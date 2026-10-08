@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block media %}
+    <style>
+        #media-table tbody td {
+            white-space: nowrap;
+        }
+
+        .delete-column {
+            width: 6em;
+            text-align: center;
+        }
+
+        ul.errorlist {
+            border: 3px red solid;
+            border-radius: 5px;
+            padding-top: 1em;
+            padding-bottom: 1em;
+            background: #e99;
+        }
+    </style>
+{% endblock %}
+
+{% block header %}
+    <div class="title-line-action">
+        [<a href="{{ url('problem_data', problem.code) }}">{{ _('Go back') }}</a>]
+    </div>
+{% endblock %}
+
+{% block body %}
+    {% if media_upload_form.non_field_errors() %}
+        <ul class="errorlist">
+            {% for error in media_upload_form.non_field_errors() %}
+                <li>{{ error }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+    {% if media_formset.non_form_errors() %}
+        <ul class="errorlist">
+            {% for error in media_formset.non_form_errors() %}
+                <li>{{ error }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    <form action="" method="POST" enctype="multipart/form-data">
+        {% csrf_token %}
+
+        <table class="table">
+            {{ media_upload_form.as_table() }}
+        </table>
+
+        <h3>{{ _('Existing media files') }}</h3>
+        {{ media_formset.management_form }}
+
+        <table id="media-table" class="table">
+            <thead>
+            <tr>
+                <th>{{ _('File name') }}</th>
+                {% if media_formset.can_delete %}
+                    <th class="delete-column">{{ _('Delete?') }}</th>
+                {% endif %}
+            </tr>
+            </thead>
+            <tbody>
+            {% for form in media_formset %}
+                {% if form.instance.pk %}
+                    {% if form.non_field_errors() %}
+                        <tr>
+                            <td colspan="{% if media_formset.can_delete %}2{% else %}1{% endif %}">
+                                {{ form.non_field_errors() }}
+                            </td>
+                        </tr>
+                    {% endif %}
+                    <tr>
+                        <td>
+                            {{ form.id }}
+                            {% if form.instance.file %}
+                                <a href="{{ form.instance.file.url }}" target="_blank">
+                                    {{ form.instance.file.name }}
+                                </a>
+                            {% else %}
+                                {{ form.instance.file.name }}
+                            {% endif %}
+                        </td>
+                        {% if media_formset.can_delete %}
+                            <td class="delete-column">{{ form.DELETE }}</td>
+                        {% endif %}
+                    </tr>
+                {% endif %}
+            {% else %}
+                <tr>
+                    <td colspan="{% if media_formset.can_delete %}2{% else %}1{% endif %}">
+                        {{ _('No media files uploaded yet.') }}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+
+        <input type="submit" value="{{ _('Submit!') }}" class="button">
+    </form>
+{% endblock %}
+

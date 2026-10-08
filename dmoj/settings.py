@@ -58,6 +58,7 @@ DMOJ_CAMO_HTTPS = False
 DMOJ_CAMO_EXCLUDE = ()
 
 DMOJ_PROBLEM_DATA_ROOT = None
+DMOJ_PROBLEM_MEDIA_ROOT = None
 
 DMOJ_PROBLEM_MIN_TIME_LIMIT = 0  # seconds
 DMOJ_PROBLEM_MAX_TIME_LIMIT = 60  # seconds
@@ -67,6 +68,11 @@ DMOJ_PROBLEM_MIN_PROBLEM_POINTS = 0
 DMOJ_PROBLEM_MIN_USER_POINTS_VOTE = 1  # when voting on problem, minimum point value user can select
 DMOJ_PROBLEM_MAX_USER_POINTS_VOTE = 50  # when voting on problem, maximum point value user can select
 DMOJ_PROBLEM_HOT_PROBLEM_COUNT = 7
+
+# Uncomment this section to allow problem media
+# DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE = 2 * 1024 * 1024 ## 2MB
+# DMOJ_PROBLEM_MEDIA_MAX_FILES = 5
+# DMOJ_PROBLEM_MEDIA_ALLOWED_FORMATS = ('.zip','.png','.jpg','.jpeg','.pdf')
 
 DMOJ_PROBLEM_STATEMENT_DISALLOWED_CHARACTERS = {'“', '”', '‘', '’', '−', 'ﬀ', 'ﬁ', 'ﬂ', 'ﬃ', 'ﬄ'}
 DMOJ_RATING_COLORS = True

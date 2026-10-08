@@ -1,0 +1,282 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-tabla]{babel}
+\usepackage[margin=2.2cm]{geometry}
+
+% Tipografía relajada, moderna y altamente legible con peso unificado
+\usepackage{charter}                     % Bitstream Charter: fuente abierta, descansada y elegante (peso regular y bold neutro)
+\usepackage[scaled=0.92]{beramono}       % Bera Mono para código claro y bien proporcionado
+
+% Microtipografía y control de espaciado interlineal (leading más abierto y descansado)
+\usepackage{microtype}
+\usepackage{setspace}
+\setstretch{1.18}                        % Leading holgado para lectura cómoda sin cansar la vista
+
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!75!black,urlcolor=blue!75!black]{hyperref}
+
+% Paleta de colores sobria, suave y descansada
+\definecolor{primary}{RGB}{24, 48, 77}
+\definecolor{secondary}{RGB}{42, 98, 148}
+\definecolor{danger}{RGB}{165, 38, 38}
+\definecolor{codebg}{RGB}{248, 250, 252}
+\definecolor{bordercolor}{RGB}{218, 224, 233}
+
+% Estilo de página limpio sin cabeceras ni pie de página
+\pagestyle{plain}
+
+% Estilo de títulos con la misma familia tipográfica (Charter) y peso bold homogéneo
+\titleformat{\section}{\large\bfseries\color{primary}}{\thesection.}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{secondary}}{\thesubsection.}{0.4em}{}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{5pt}
+
+% Espaciado de listas con mayor aire
+\setlist{itemsep=3.5pt, topsep=3.5pt, parsep=1pt}
+
+% Configuración de código con tipografía clara y leading neutro
+\lstset{
+    basicstyle=\ttfamily\small\setstretch{1.02},
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{bordercolor},
+    breaklines=true,
+    breakatwhitespace=true,
+    showstringspaces=false,
+    keywordstyle=\color{secondary}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{danger},
+    aboveskip=8pt,
+    belowskip=8pt
+}
+
+\begin{document}
+
+% Encabezado
+\noindent
+{\LARGE\textbf{\color{primary}Reporte de Seguridad: Hosting de Medios en DMOJ}}\\[0.25em]
+{\large\textbf{\color{secondary}Análisis de Vulnerabilidades, Embedding Seguro de PDF y Plan de Acción}}\\[0.4em]
+{\small\color{gray}Octubre 2026}
+\vspace{0.4em}
+\hrule height 0.8pt
+\vspace{0.9em}
+
+\section{Análisis de Amenazas y Vulnerabilidades por Formato}
+
+El soporte de archivos multimedia en DMOJ introduce vectores de ataque diferenciados según la estructura interna de cada formato:
+
+\subsection{Formato PNG (Portable Network Graphics)}
+Formato gráfico basado en bloques (\textit{chunks}) binarios (\texttt{IHDR}, \texttt{IDAT}, \texttt{IEND}) y bloques auxiliares de metadatos (\texttt{tEXt}, \texttt{zTXt}, \texttt{iTXt}).
+\begin{itemize}
+    \item \textbf{Decompression Bombs (Pixel Floods):} Un atacante manipula la cabecera \texttt{IHDR} declarando dimensiones gigantescas (e.g. $50000 \times 50000$ px) en un archivo comprimido de pocos kilobytes. Al procesarlo, la librería del servidor o el navegador del usuario asigna memoria para cada píxel sin comprimir (RGBA $\approx$ 10 GB de RAM), desatando un colapso por \textit{Out-Of-Memory} (DoS).
+    \item \textbf{MIME-Sniffing y XSS Almacenado:} Los chunks de metadatos permiten inyectar texto arbitrario. Si el servidor responde sin \texttt{X-Content-Type-Options: nosniff}, navegadores antiguos o visores heurísticos detectan cadenas HTML/JS dentro del PNG y las ejecutan en el contexto del sitio.
+    \item \textbf{Ataques Polyglot (PNG + HTML):} Archivos con cabecera válida de PNG que contienen etiquetas HTML válidas capaces de ser interpretadas por navegadores si se invocan directamente.
+\end{itemize}
+
+\subsection{Formato JPG / JPEG (Joint Photographic Experts Group)}
+Formato ráster que utiliza segmentos de aplicación (\texttt{APP0} a \texttt{APP15}) para almacenar metadatos en estándares EXIF, IPTC y XMP, delimitado por el marcador de inicio \texttt{0xFFD8FF} y cierre \texttt{0xFFD9} (\texttt{EOI}).
+\begin{itemize}
+    \item \textbf{Inyección en Metadatos EXIF:} Atacantes inyectan código malicioso (e.g. \texttt{"\textless script\textgreater alert(1)\textless/script\textgreater"}) en campos estándar como \texttt{Artist}, \texttt{CameraModel} o \texttt{UserComment}. Si una vista de administración o foro renderiza estos valores sin escapar, ocurre un XSS almacenado.
+    \item \textbf{Progressive JPEG DoS:} Imágenes con múltiples pasadas espectrales entrelazadas diseñadas para forzar ciclos de cálculo excesivos en los decodificadores gráficos.
+    \item \textbf{Cargas útiles post-EOI:} Los visualizadores ignoran datos situados después del marcador \texttt{0xFFD9}, permitiendo anexar scripts o binarios ocultos que evaden escaneos superficiales.
+\end{itemize}
+
+\subsection{Formato PDF (Portable Document Format)}
+Documento estructurado en objetos con soporte nativo para flujos de datos comprimidos, acciones automáticas y motores de scripting internos. \textbf{Es el formato de mayor riesgo para los usuarios finales.}
+\begin{itemize}
+    \item \textbf{Ejecución de JavaScript Activo (\texttt{/JS}, \texttt{/JavaScript}):} Los visores integrados en navegadores modernos (PDFium en Chromium, PDF.js en Firefox) soportan JavaScript. Si un PDF se despacha de forma \textit{inline} en el mismo dominio (\texttt{judge.com/media/archivo.pdf}), el script corre en el origen del sitio y puede \textbf{robar cookies de sesión (\texttt{sessionid}) y tokens CSRF}.
+    \item \textbf{Acciones de Lanzamiento y Formularios (\texttt{/Launch}, \texttt{/SubmitForm}):} Permiten intentar abrir procesos en la máquina del usuario o enviar datos locales a servidores externos de control.
+    \item \textbf{Archivos Incrustados Ocultos (\texttt{/EmbeddedFiles}):} Embebido de malware o ejecutables destinados a engañar a los concursantes que descargan el material.
+\end{itemize}
+
+\subsection{Formato ZIP (PKZIP Archive)}
+Estructura de archivo contenedor con cabeceras locales (\texttt{PK\textbackslash x03\textbackslash x04}) y un directorio central. Utilizado en DMOJ tanto para paquetes de evaluación como para archivos de plantilla/starter kits que los concursantes descargan en sus máquinas.
+\begin{itemize}
+    \item \textbf{RCE en el Servidor vía Zip Slip:} Rutas con secuencias relativas (e.g. \texttt{../../dmoj/settings.py}). Al descomprimirse en el backend, sobrescribe archivos de la aplicación o del sistema operativo, logrando ejecución remota de código en el servidor.
+    \item \textbf{RCE en el Cliente vía Plantillas Maliciosas:} Cuando un creador de problemas o atacante sube un ZIP con código de plantilla para los participantes, puede incluir archivos que logran ejecución de código en la máquina del concursante al descargarlo o abrirlo:
+    \begin{itemize}
+        \item Binarios o scripts directos (\texttt{.exe}, \texttt{.sh}, \texttt{.bat}, \texttt{.vbs}, \texttt{.ps1}).
+        \item Archivos de configuración de IDEs (e.g. \texttt{.vscode/tasks.json}, subcarpetas \texttt{.idea}) que ejecutan comandos automáticos al abrir el proyecto en VS Code o CLion.
+        \item Scripts de build maliciosos (\texttt{Makefile}, \texttt{CMakeLists.txt}) o archivos con extensiones dobles engañosas (\texttt{template.cpp.exe}).
+    \end{itemize}
+    \item \textbf{Zip Bomb (Compresión Recursiva / DoS Extremo):} Ratios de compresión anómalos (ej. 50 KB expanden a 50 GB) que saturan el disco o la RAM al descomprimirse.
+    \item \textbf{Manipulación de Symlinks:} Enlaces simbólicos apuntando a rutas del sistema operativo (\texttt{/etc/passwd}, \texttt{db.sqlite3}) para exfiltrar datos del servidor o del equipo de la víctima.
+\end{itemize}
+
+\vspace{0.4em}
+\begin{table}[h!]
+\centering
+\small
+\setstretch{1.08}
+\caption{Matriz Comparativa de Riesgos y Contramedidas}
+\label{tab:riesgos}
+\begin{tabularx}{\textwidth}{l p{4.2cm} p{3.8cm} X}
+\toprule
+\textbf{Formato} & \textbf{Vectores Críticos} & \textbf{Impacto Potencial} & \textbf{Contramedida Técnica Obligatoria} \\
+\midrule
+\textbf{PNG} & Decompression bomb, metadatos con scripts, polyglot & Consumo de RAM (DoS), XSS por sniffing & Re-codificación con Pillow, límite \texttt{MAX\_IMAGE\_PIXELS}, header \texttt{nosniff}. \\
+\addlinespace
+\textbf{JPG} & Payloads en etiquetas EXIF, datos post-EOI & XSS en vistas administrativas & Eliminación total de metadatos EXIF, re-muestreo a búfer nuevo en memoria. \\
+\addlinespace
+\textbf{PDF} & Scripts activos (\texttt{/JS}), acciones (\texttt{/Launch}), iframes & Robo de sesión (\texttt{sessionid}), phishing & Aislamiento de origen, \texttt{\textless iframe\textgreater} restringido o rasterización server-side. \\
+\addlinespace
+\textbf{ZIP} & Zip Slip (\texttt{../}), RCE en cliente (scripts/templates), symlinks & RCE en servidor o en estación del usuario, DoS & Lista blanca estricta de extensiones de código, normpath, ratio máx 20:1, sin symlinks. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Análisis Especializado: Previsualización y Embedding Seguro de PDFs}
+
+Forzar la descarga exclusiva (\texttt{Content-Disposition: attachment}) es la medida más restrictiva contra ataques a clientes, pero destruye la experiencia de usuario (UX) cuando se requiere previsualizar enunciados de problemas en la web.
+
+El debate técnico sobre cómo incrustar PDFs no confiables (e.g., discusión técnica de referencia en \textit{Security StackExchange} / PrivateBin / MDN) expone trade-offs determinantes:
+
+\subsection{Comparativa de Mecanismos Frontend: \texttt{\textless embed\textgreater}, \texttt{\textless object\textgreater} e \texttt{\textless iframe\textgreater}}
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Elemento \texttt{\textless embed\textgreater} (Inseguro - Descartado):} Históricamente utilizado para incrustar plugins. En varios navegadores y contextos de renderizado, el contenido de \texttt{\textless embed\textgreater} puede interactuar o heredar acceso directo al documento padre (\texttt{top-level document}), carece de control granular de sandbox y no admite directivas modernas de carga (\texttt{loading="lazy"}, \texttt{referrerpolicy}).
+    \item \textbf{Elemento \texttt{\textless object\textgreater} (No recomendado):} Requiere relajar la directiva CSP \texttt{object-src}. Las mejores prácticas de seguridad web exigen fijar \texttt{object-src 'none'} para neutralizar la ejecución de plugins Flash/Java/ActiveX heredados. Usar \texttt{\textless object\textgreater} debilita el perfil global de seguridad de la aplicación.
+    \item \textbf{Elemento \texttt{\textless iframe\textgreater} (Estándar Recomendado):}
+    \begin{itemize}
+        \item Se gobierna mediante la directiva CSP \texttt{frame-src}, permitiendo autorizar exclusivamente el subdominio aislado de medios.
+        \item Admite aislamiento de contexto y carga perezosa.
+        \item \textbf{El dilema del atributo \texttt{sandbox}:} Aplicar un sandbox ciego (e.g. \texttt{sandbox=""} sin \texttt{allow-scripts}) suele romper el visor de PDF integrado en el navegador (como Mozilla PDF.js o Chrome PDFium), ya que estos motores requieren JavaScript interno para renderizar el documento. No obstante, los visores nativos modernos ya cuentan con su propio sandboxing de procesos a nivel de sistema operativo.
+        \item \textbf{Mitigación óptima en iframe:} La protección crítica consiste en que el \texttt{src} del iframe apunte a un \textbf{origen cruzado sin cookies} (\texttt{https://media.dmoj.local/pdf/...}), configurando \texttt{sandbox="allow-scripts allow-same-origin"} pero \textbf{omitiendo} \texttt{allow-top-navigation} y \texttt{allow-popups} para impedir secuestro de ventana o ataques de phishing.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{La Solución de Máxima Seguridad: Rasterización Server-Side (PDF-to-Image)}
+Para eliminar por completo el riesgo de explotación en el cliente (vulnerabilidades 0-day en PDFium/PDF.js o bypasses de sandbox), la estrategia más robusta para DMOJ consiste en renderizar una previsualización en el servidor:
+\begin{itemize}
+    \item Un worker asíncrono o servicio aislado en backend (utilizando \texttt{pdftoppm} de Poppler o MuPDF encapsulado en un contenedor mínimo con límites de memoria y CPU) convierte cada página del PDF en una imagen ráster estática (\texttt{.png}).
+    \item La interfaz web de DMOJ muestra la previsualización del enunciado mediante etiquetas inertes \texttt{\textless img\textgreater}.
+    \item Esto reduce la superficie de ataque del cliente a \textbf{cero} (no hay ejecución de JavaScript de PDF, no hay manipulación de DOM ni exploits de visores), reservando el archivo PDF original como enlace de descarga opcional bajo \texttt{Content-Disposition: attachment}.
+\end{itemize}
+
+\section{Arquitectura Defensiva Global (Defense-in-Depth)}
+
+Se articulan tres capas de defensa simultáneas para blindar la plataforma:
+
+\subsection{1. Aislamiento de Origen (Dominio sin Cookies)}
+El vector más destructivo en el cliente (robo de cookies y XSS) queda neutralizado aislando el origen:
+\begin{itemize}
+    \item El contenido de medios debe servirse desde un subdominio dedicado (ej. \texttt{media.dmoj.local}).
+    \item En la configuración de Django (\texttt{settings.py}), se delimita el alcance de las cookies de sesión al dominio principal:
+    \begin{lstlisting}[language=Python]
+SESSION_COOKIE_DOMAIN = "dmoj.local"  # No se transmite al dominio de medios
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = True
+    \end{lstlisting}
+    \item Si un archivo lograra ejecutar JavaScript en su propio visor, correrá en un origen sin credenciales ni acceso al DOM del juez.
+\end{itemize}
+
+\subsection{2. Encabezados HTTP de Seguridad Estricta}
+El servidor web (Nginx) y las respuestas de Django deben emitir encabezados restrictivos:
+\begin{itemize}
+    \item \textbf{X-Content-Type-Options (\texttt{nosniff}):} Impide que el navegador ignore el MIME declarado e interprete HTML oculto en imágenes o documentos.
+    \item \textbf{Content-Security-Policy:}
+    \begin{itemize}
+        \item En el sitio principal: \texttt{object-src 'none'; frame-src https://media.dmoj.local;}
+        \item En el dominio de medios: \texttt{default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; sandbox;}
+    \end{itemize}
+    \item \textbf{Content-Disposition:}
+    \begin{itemize}
+        \item Imágenes (\texttt{.png}, \texttt{.jpg}): \texttt{inline} (para visualización en enunciados).
+        \item ZIPs: \texttt{attachment; filename="seguro.zip"} (descarga obligatoria).
+        \item PDFs: \texttt{inline} únicamente dentro de \texttt{\textless iframe\textgreater} en el dominio de medios aislado; en cualquier otro contexto, forzar \texttt{attachment}.
+    \end{itemize}
+    \item \textbf{Cross-Origin-Resource-Policy (\texttt{cross-origin}):} Permite cargar imágenes en los enunciados mediante etiquetas \texttt{\textless img\textgreater} sin comprometer la política de aislamiento.
+\end{itemize}
+
+\subsection{3. Almacenamiento Seguro, Sanitización y Control de Templates}
+\begin{itemize}
+    \item \textbf{Identificadores Opacos (UUIDv4):} Los ficheros se guardan en el disco con identificadores aleatorios: \texttt{problem\_media/\textless problem\_code\textgreater/\textless uuid4\textgreater.\textless ext\textgreater}. El nombre legible del usuario solo se utiliza en la cabecera \texttt{Content-Disposition} debidamente escapado.
+    \item \textbf{Filtrado Estricto de Contenido de ZIPs (Anti-RCE Cliente y Servidor):} Todo paquete ZIP (ya sea de datos o plantillas para participantes) debe someterse a inspección profunda de sus entradas:
+    \begin{itemize}
+        \item \textbf{Lista blanca de extensiones:} Permitir únicamente archivos de código fuente y datos puros (\texttt{.cpp}, \texttt{.c}, \texttt{.h}, \texttt{.hpp}, \texttt{.py}, \texttt{.java}, \texttt{.in}, \texttt{.out}, \texttt{.txt}).
+        \item \textbf{Bloqueo de directorios ocultos y de configuración:} Rechazar cualquier entrada que comience por punto o rutas como \texttt{.vscode/}, \texttt{.idea/}, \texttt{.git/}, impidiendo ejecución arbitraria al abrir el proyecto en un IDE.
+        \item \textbf{Prohibición total de ejecutables y scripts:} Rechazar automáticamente extensiones de scripts o binarios (\texttt{.sh}, \texttt{.bat}, \texttt{.ps1}, \texttt{.exe}, \texttt{.dll}, etc.) y scripts de build no confiables (\texttt{Makefile}).
+    \end{itemize}
+    \item \textbf{Punto de Montaje No Ejecutable:} El directorio de medios en el servidor debe montarse con flags \texttt{noexec, nosuid, nodev} en \texttt{/etc/fstab}, impidiendo la ejecución de cualquier script que lograse filtrarse.
+    \item \textbf{Re-codificación en Memoria:} Las imágenes son deserializadas y re-exportadas limpias con Pillow, destruyendo cualquier payload alojado en metadatos o chunks no esenciales antes de tocar el disco.
+\end{itemize}
+
+\section{Plan de Acción e Implementación}
+
+Hoja de ruta secuencial para habilitar el hosting de medios en DMOJ:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Fase 1: Corrección Inmediata de Encabezados y Despacho (Semana 1)}
+    \begin{itemize}
+        \item Modificar \texttt{problem\_media\_file} en \texttt{judge/views/problem\_data.py}:
+        \begin{itemize}
+            \item Reemplazar \texttt{application/octet-stream} indiscriminado por el MIME exacto.
+            \item Forzar cabeceras \texttt{X-Content-Type-Options: nosniff} y \texttt{Content-Security-Policy}.
+            \item Asignar \texttt{Content-Disposition: attachment} para archivos \texttt{.zip}.
+        \end{itemize}
+        \item Restringir el acceso a medios verificando permisos de visualización del problema (\texttt{is\_editable\_by} o problema publicado no confidencial).
+    \end{itemize}
+
+    \item \textbf{Fase 2: Pipeline de Validación y Desinfección (Semanas 2 y 3)}
+    \begin{itemize}
+        \item Integrar el validador provisto (\texttt{security/media\_security\_validator.py}) en el método \texttt{clean\_upload} de \texttt{ProblemMediaUploadForm}.
+        \item Activar el re-muestreo obligatorio de imágenes PNG/JPG descartando metadatos EXIF.
+        \item Habilitar la validación preventiva de archivos ZIP: verificación de rutas seguras (\texttt{os.path.normpath} sin \texttt{..}), lista blanca estricta de extensiones de código/texto para plantillas, bloqueo de carpetas ocultas de IDEs (\texttt{.vscode}, \texttt{.idea}), rechazo total de symlinks y límite de ratio a 20:1.
+        \item Bloquear subida de PDFs que contengan patrones \texttt{/JavaScript}, \texttt{/JS} o \texttt{/Launch}.
+    \end{itemize}
+
+    \item \textbf{Fase 3: Aislamiento de Infraestructura y Preview de PDF (Semanas 4 y 5)}
+    \begin{itemize}
+        \item Desplegar la configuración de Nginx (\texttt{security/nginx\_media\_hardening.conf}) usando \texttt{X-Accel-Redirect} en el subdominio dedicado \texttt{media.dmoj.local}.
+        \item Implementar el preview de PDFs:
+        \begin{itemize}
+            \item \textit{Estrategia recomendada:} Generación de miniaturas PNG de las páginas del PDF mediante worker aislado con \texttt{pdftoppm}.
+            \item \textit{Estrategia directa en visor:} Incrustar exclusivamente mediante \texttt{\textless iframe\textgreater} apuntando a \texttt{media.dmoj.local}, con CSP \texttt{frame-src} estricto y descartando terminantemente \texttt{\textless embed\textgreater} u \texttt{\textless object\textgreater}.
+        \end{itemize}
+        \item Montar directorio físico con permisos restringidos (\texttt{chmod 750}) y flag \texttt{noexec}.
+    \end{itemize}
+
+    \item \textbf{Fase 4: Testing Automatizado y Despliegue (Semana 6)}
+    \begin{itemize}
+        \item Integrar la suite de pruebas unitarias (\texttt{security/test\_security\_pipeline.py}) al pipeline de CI/CD para garantizar que futuras modificaciones no introduzcan regresiones de seguridad.
+        \item Habilitar tokens temporales de descarga firmados con HMAC para problemas en concursos activos con enunciados privados.
+    \end{itemize}
+\end{enumerate}
+
+\section{Configuración Esencial de Referencia (Nginx Hardening)}
+
+Directiva central que debe incorporarse en el servidor web para el dominio de medios:
+
+\begin{lstlisting}[language=sh]
+location /internal_media/ {
+    internal;
+    alias /var/dmoj/problem_media/;
+
+    # Bloqueo total de MIME-sniffing y aislamiento CSP
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; sandbox allow-scripts allow-same-origin;" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Cross-Origin-Resource-Policy "cross-origin" always;
+
+    # Imagenes seguras se muestran inline en enunciados
+    location ~* \.(png|jpg|jpeg)$ {
+        add_header Content-Disposition "inline" always;
+    }
+    # Archivos ZIP forzados a descarga obligatoria
+    location ~* \.zip$ {
+        add_header Content-Disposition "attachment" always;
+    }
+    # PDFs servidos para previsualizacion aislada en iframe
+    location ~* \.pdf$ {
+        add_header Content-Disposition "inline" always;
+    }
+}
+\end{lstlisting}
+
+\end{document}

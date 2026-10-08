@@ -8,6 +8,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.urls import reverse
 from django.utils.translation import gettext as _
+from django import forms
 
 if os.altsep:
     def split_path_first(path, repath=re.compile('[%s]' % re.escape(os.sep + os.altsep))):
@@ -17,20 +18,21 @@ else:
         return path.split(os.sep, 1)
 
 
-class ProblemDataStorage(FileSystemStorage):
+class ProblemFileStorage(FileSystemStorage):
     def __init__(self):
-        super(ProblemDataStorage, self).__init__(settings.DMOJ_PROBLEM_DATA_ROOT)
+        super(ProblemFileStorage, self).__init__(settings.DMOJ_PROBLEM_DATA_ROOT)
+        self.url_solve = 'problem_data_file'
 
     def url(self, name):
         path = split_path_first(name)
         if len(path) != 2:
             raise ValueError('This file is not accessible via a URL.')
-        return reverse('problem_data_file', args=path)
+        return reverse(self.url_solve, args=path)
 
     def _save(self, name, content):
         if self.exists(name):
             self.delete(name)
-        return super(ProblemDataStorage, self)._save(name, content)
+        return super(ProblemFileStorage, self)._save(name, content)
 
     def get_available_name(self, name, max_length=None):
         return name
@@ -39,12 +41,22 @@ class ProblemDataStorage(FileSystemStorage):
         return os.rename(self.path(old), self.path(new))
 
 
+class ProblemDataStorage(ProblemFileStorage):
+    def __init__(self):
+        super(ProblemFileStorage,self).__init__(settings.DMOJ_PROBLEM_DATA_ROOT)
+        self.url_solve = 'problem_data_file'
+
+class ProblemMediaStorage(ProblemFileStorage):
+    def __init__(self):
+        super(ProblemFileStorage,self).__init__(settings.DMOJ_PROBLEM_MEDIA_ROOT)
+        self.url_solve = 'problem_media_file'
+
 class ProblemDataError(Exception):
     def __init__(self, message):
         super(ProblemDataError, self).__init__(message)
         self.message = message
 
-
+# --- DEPRECATED (problem data includes an init_file) ---
 class ProblemDataCompiler(object):
     def __init__(self, problem, data, cases, files):
         self.problem = problem
