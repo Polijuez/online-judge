@@ -273,6 +273,11 @@ urlpatterns = [
         path('judges', api.api_v2.APIJudgeList.as_view()),
     ])),
 
+    path('api/v1/', include([
+        path('problems', api.ProblemPublishView.as_view(), name='api_problem_publish'),
+        path('problems/<str:problem_id>', api.ProblemReplaceView.as_view(), name='api_problem_replace'),
+    ])),
+
     path('blog/', paged_list_view(blog.PostList, 'blog_post_list')),
     path('post/<int:id>-<slug:slug>', blog.PostView.as_view(), name='blog_post'),
 

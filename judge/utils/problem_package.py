@@ -149,8 +149,8 @@ class _Package:
         return files
 
 
-def _package_error(reason, file=None):
-    return PackageError(reason, file=file)
+def _package_error(reason, file=None, code='invalid_package'):
+    return PackageError(reason, file=file, code=code)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ def _read_entries(raw):
             if _is_symlink(info):
                 raise _package_error('symlinks are not accepted', file=name)
             if max_size is not None and info.file_size > max_size:
-                raise _package_error('file is too big (max %s)' % _format_size(max_size), file=name)
+                raise _package_error('file is too big (max %s)' % format_size(max_size), file=name)
             entries[name] = archive.read(info)
     finally:
         archive.close()
@@ -232,7 +232,7 @@ def _read_nested_archive(name, raw):
                 raise _package_error('symlinks are not accepted', file=name)
             if max_size is not None and info.file_size > max_size:
                 raise _package_error(
-                    'file is too big (max %s)' % _format_size(max_size), file=name,
+                    'file is too big (max %s)' % format_size(max_size), file=name,
                 )
             names[entry] = info.file_size
     finally:
@@ -240,7 +240,7 @@ def _read_nested_archive(name, raw):
     return names
 
 
-def _format_size(size):
+def format_size(size):
     if size < 1024:
         return '%dB' % size
     if size < 1024 * 1024:
@@ -256,10 +256,19 @@ def _parse_manifest(raw):
     if not isinstance(data, dict):
         raise _package_error('must be a YAML dictionary', file=MANIFEST_NAME)
 
-    schema = data.get('schema')
-    if not isinstance(schema, int) or isinstance(schema, bool) or schema != SUPPORTED_SCHEMA:
+    if 'schema' not in data:
+        raise _package_error('schema is required', file=MANIFEST_NAME)
+    schema = data['schema']
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        raise _package_error(
+            'schema must be an integer (supported: %d)' % SUPPORTED_SCHEMA, file=MANIFEST_NAME,
+        )
+    if schema != SUPPORTED_SCHEMA:
+        # Un esquema que el servidor no conoce es un pedido que no se puede
+        # interpretar, no un paquete mal formado: la API lo distingue con 422.
         raise _package_error(
             'unknown schema %r (supported: %d)' % (schema, SUPPORTED_SCHEMA), file=MANIFEST_NAME,
+            code='unsupported_schema',
         )
 
     unknown = sorted(set(data) - MANIFEST_KEYS)
@@ -494,7 +503,7 @@ def _collect_media(entries):
         if extension not in allowed_formats:
             raise _package_error('media file extension is not allowed', file=name)
         if max_size is not None and len(content) > max_size:
-            raise _package_error('media file is too big (max %s)' % _format_size(max_size), file=name)
+            raise _package_error('media file is too big (max %s)' % format_size(max_size), file=name)
         media[relative] = content
     if max_files is not None and len(media) > max_files:
         raise _package_error('too many media files (max %d)' % max_files, file=MEDIA_PREFIX)
@@ -831,7 +840,7 @@ def _resolve_types(names, warnings):
     return types
 
 
-def _apply_metadata(problem, package, specs, created, warnings):
+def _apply_metadata(problem, package, specs, created, warnings, author=None):
     manifest = package.manifest
     group = _resolve_group(manifest.group, warnings)
     types = _resolve_types(manifest.types, warnings)
@@ -847,6 +856,10 @@ def _apply_metadata(problem, package, specs, created, warnings):
         problem.description = package.statement
         problem.save()
         problem.allowed_languages.set(Language.objects.all())
+        if author is not None:
+            # El que publica queda como autor, dentro de la misma transacción:
+            # es la regla de edición que lo habilita a reemplazar el problema.
+            problem.authors.add(author)
     else:
         problem.name = manifest.title
         problem.description = package.statement
@@ -926,13 +939,14 @@ def _check_alias_conflicts(manifest, problem):
         )
 
 
-def publish_package(source, problem=None):
+def publish_package(source, problem=None, author=None):
     """Publica ``source`` (bytes, archivo o camino a un zip) en ``problem``.
 
-    Con ``problem=None`` crea un problema nuevo; si no, reemplaza el paquete
-    vigente. Valida todo antes de tocar disco o base y escribe los árboles de
-    datos y medios en directorios temporales de la misma raíz, intercambiándolos
-    recién al final. Ante cualquier fallo, el paquete anterior queda intacto.
+    Con ``problem=None`` crea un problema nuevo y deja a ``author`` (un
+    ``Profile``) como autor; si no, reemplaza el paquete vigente. Valida todo
+    antes de tocar disco o base y escribe los árboles de datos y medios en
+    directorios temporales de la misma raíz, intercambiándolos recién al final.
+    Ante cualquier fallo, el paquete anterior queda intacto.
 
     Devuelve un :class:`PublishResult`. Los errores de validación son
     :class:`PackageError` y nombran el archivo y el motivo.
@@ -984,7 +998,7 @@ def publish_package(source, problem=None):
 
         try:
             with transaction.atomic():
-                _apply_metadata(problem, package, specs, created, warnings)
+                _apply_metadata(problem, package, specs, created, warnings, author=author)
 
                 aliases_added = []
                 _add_aliases(problem, manifest, aliases_added)

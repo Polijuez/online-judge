@@ -63,6 +63,12 @@ DMOJ_PROBLEM_MEDIA_ROOT = None
 # Maximum size of a problem data file (zip, init.yml, checker, ...). None disables the check.
 DMOJ_PROBLEM_MAX_FILE_SIZE = None
 
+# Límites del request de publicación (API v1): el cuerpo es el zip del paquete
+# y se arma en memoria, así que el tamaño se acota antes de leerlo. None
+# desactiva el límite correspondiente.
+DMOJ_PROBLEM_PACKAGE_MAX_SIZE = 64 * 1024 * 1024  # 64 MB
+DMOJ_PROBLEM_PACKAGE_MAX_FILES = 1000
+
 DMOJ_PROBLEM_MIN_TIME_LIMIT = 0  # seconds
 DMOJ_PROBLEM_MAX_TIME_LIMIT = 60  # seconds
 DMOJ_PROBLEM_MIN_MEMORY_LIMIT = 0  # kilobytes
