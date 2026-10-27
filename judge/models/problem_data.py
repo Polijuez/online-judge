@@ -3,11 +3,10 @@ import os
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
-from judge.utils.problem_data import ProblemDataStorage,ProblemMediaStorage
+from judge.utils.problem_data import ProblemDataStorage
 
-__all__ = ['problem_media_storage', 'problem_data_storage', 'problem_directory_file', 'ProblemData', 'ProblemTestCase', 'ProblemMedia']
+__all__ = ['problem_data_storage', 'problem_directory_file', 'ProblemData', 'ProblemTestCase']
 
-problem_media_storage = ProblemMediaStorage()
 problem_data_storage = ProblemDataStorage()
 
 def _problem_directory_file(code, filename):
@@ -94,11 +93,5 @@ class ProblemTestCase(models.Model):
     input_file = models.CharField(max_length=100, verbose_name=_('input file name'), blank=True)
     output_file = models.CharField(max_length=100, verbose_name=_('output file name'), blank=True)
     points = models.IntegerField(verbose_name=_('point value'), blank=True, null=True)
-
-class ProblemMedia(models.Model):
-    dataset = models.ForeignKey('Problem', verbose_name=_('problem data set'), related_name='media',
-                                on_delete=models.CASCADE)
-    file = models.FileField(verbose_name=_('media file'), storage=problem_media_storage, null=True, blank=False,
-                            upload_to=problem_directory_file)
 
 

@@ -40,9 +40,3 @@ class ProblemFileStorage(FileSystemStorage):
 
 class ProblemDataStorage(ProblemFileStorage):
     pass
-
-
-class ProblemMediaStorage(ProblemFileStorage):
-    def __init__(self):
-        super().__init__(settings.DMOJ_PROBLEM_MEDIA_ROOT)
-        self.url_solve = 'problem_media_file'

@@ -62,7 +62,6 @@
         {% if data_form.instance.has_yml %}
             [<a href="{{ url('problem_data_init', problem.code) }}">{{ _('View YAML') }}</a>]
         {% endif %}
-        [<a href="{{ url('problem_media', problem.code) }}">{{ _('View media') }}</a>]
     </div>
 {% endblock %}
 

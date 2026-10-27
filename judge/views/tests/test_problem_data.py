@@ -40,9 +40,8 @@ class ProblemDataFormTestCase(TestCase):
             prefix='problem-data',
         )
 
-    def test_initfile_is_accepted_without_media_settings(self):
-        # The media limits (DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE and friends) are unset by default;
-        # they must not be required to upload a problem file.
+    def test_initfile_is_accepted_without_a_size_limit(self):
+        # DMOJ_PROBLEM_MAX_FILE_SIZE is unset by default, so no size is enforced.
         form = self.build_form('init.yml', INIT_YML)
         self.assertTrue(form.is_valid(), form.errors)
 
@@ -50,7 +49,6 @@ class ProblemDataFormTestCase(TestCase):
         form = self.build_form('init.txt', INIT_YML)
         self.assertFalse(form.is_valid())
         self.assertIn('initfile', form.errors)
-        self.assertNotIn('Problem media is not allowed', str(form.errors))
 
     def test_initfile_that_is_not_a_yaml_dictionary_is_rejected(self):
         form = self.build_form('init.yml', b'- not a dictionary\n')

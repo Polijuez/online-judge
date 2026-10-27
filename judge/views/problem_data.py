@@ -10,7 +10,7 @@ from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import ValidationError
-from django.forms import BaseModelFormSet, HiddenInput, ModelForm, NumberInput, Form, FileField, Select, formset_factory, modelformset_factory
+from django.forms import BaseModelFormSet, HiddenInput, ModelForm, NumberInput, Select, formset_factory
 from django.http import Http404, HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -21,8 +21,8 @@ from django.views.generic import DetailView
 from django.db import transaction
 
 from judge.highlight_code import highlight_code
-from judge.models import Problem, ProblemData, ProblemTestCase, ProblemMedia, Submission,  \
-    problem_data_storage, problem_media_storage, problem_directory_file
+from judge.models import Problem, ProblemData, ProblemTestCase, Submission, problem_data_storage, \
+    problem_directory_file
 from judge.utils.unicode import utf8text
 from judge.utils.views import TitleMixin, add_file_response
 from judge.views.problem import ProblemMixin
@@ -65,19 +65,6 @@ def check_problem_file(file, ext=None):
         else:
             raise ValidationError(_("%s format is not accepted") % file.name)
     _check_file_size(file, getattr(settings, 'DMOJ_PROBLEM_MAX_FILE_SIZE', None))
-
-def check_media_file(file):
-    """Validate a media file against the media limits, which are opt-in."""
-    allowed_formats = getattr(settings, 'DMOJ_PROBLEM_MEDIA_ALLOWED_FORMATS', None)
-    max_file_size = getattr(settings, 'DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE', None)
-    if not allowed_formats or max_file_size is None:
-        raise ValidationError(_("Problem media is not allowed"))
-
-    if isinstance(allowed_formats, str):
-        allowed_formats = (allowed_formats,)
-    if not file.name.endswith(tuple(allowed_formats)):
-        raise ValidationError(_("%s format is not accepted") % file.name)
-    _check_file_size(file, max_file_size)
 
 def _get_valid_name(data, filename):
     return problem_directory_file(data, problem_data_storage.get_valid_name(filename))
@@ -397,90 +384,6 @@ class ProblemDataView(TitleMixin, ProblemManagerMixin):
 
     put = post
 
-class ProblemMediaForm(ModelForm):
-    class Meta:
-        model = ProblemMedia
-        fields = ('file',)
-
-ProblemMediaFormSet = modelformset_factory(ProblemMedia, form=ProblemMediaForm, extra=0, can_delete=True)
-
-class ProblemMediaUploadForm(Form):
-    upload = FileField(label=_('upload media'),
-                       required=False,
-                       help_text=_("Allowed formats: .zip, .png, .jpeg, .pdf"))
-
-    def clean_upload(self):
-        upload = self.cleaned_data['upload']
-        if not upload:
-            return upload
-
-        check_media_file(upload)
-
-        if hasattr(self,'problem'):
-            media_files = ProblemMedia.objects.filter(dataset=self.problem)
-            if hasattr(settings, "DMOJ_PROBLEM_MEDIA_MAX_FILES"):
-                if len(media_files) > settings.DMOJ_PROBLEM_MEDIA_MAX_FILES:
-                    raise ValidationError(_("Too many media files"))
-            else:
-                raise ValidationError(_("Problem media is not allowed"))
-            filenames = [f.file.name for f in media_files]
-            check_file_duplicate(self,filenames+[_get_valid_name(self,upload)],filenames+[""])
-            return upload
-        return None
-    
-class ProblemMediaView(TitleMixin, ProblemManagerMixin):
-    template_name = 'problem/media.html'
-
-    def get_title(self):
-        return _('Editing media for {0}').format(self.object.name)
-
-    def get_content_title(self):
-        return mark_safe(escape(_('Editing media for %s')) % (
-            format_html('<a href="{1}">{0}</a>', self.object.name,
-                        reverse('problem_detail', args=[self.object.code]))))
-
-    def get_media_formset(self, post=False):
-        return ProblemMediaFormSet(data=self.request.POST if post else None, prefix='media',
-                                    queryset=ProblemMedia.objects.filter(dataset=self.object.pk))
-
-    def get_media_upload_form(self, post=False):
-        return ProblemMediaUploadForm(data=self.request.POST if post else None, prefix='media-upload',
-                                      files=self.request.FILES if post else None)
-    
-    def get_context_data(self, **kwargs):
-        context = super(ProblemMediaView, self).get_context_data(**kwargs)
-        if 'media_formset' not in context:
-            context['media_formset'] = self.get_media_formset()
-        if 'media_upload_form' not in context:
-            context['media_upload_form'] = self.get_media_upload_form()
-        return context
-
-    def post(self, request, *args, **kwargs):
-        self.object = problem = self.get_object()
-        media_upload_form = self.get_media_upload_form(post=True)
-        media_upload_form.problem = problem
-        media_formset = self.get_media_formset(post=True)
-
-        if media_upload_form.is_valid() and media_formset.is_valid():
-            upload = media_upload_form.cleaned_data.get('upload')
-            if upload:
-                media_file = ProblemMedia(dataset=problem, file=upload)
-                media_file.problem = problem
-                media_file.save()
-
-            for media_file in media_formset.save(commit=False):
-                media_file.dataset_id = problem.id
-                media_file.save()
-            for media_file in media_formset.deleted_objects:
-                media_file.delete()
-
-            return HttpResponseRedirect(request.get_full_path())
-
-        return self.render_to_response(self.get_context_data(media_formset=media_formset,
-                                                             media_upload_form=media_upload_form))
-
-    put = post
-
 
 @login_required
 def problem_data_file(request, problem, path):
@@ -501,33 +404,6 @@ def problem_data_file(request, problem, path):
 
     try:
         add_file_response(request, response, url_path, os.path.join(problem, path), problem_data_storage)
-    except IOError:
-        raise Http404()
-
-    response['Content-Type'] = 'application/octet-stream'
-    return response
-
-@login_required
-def problem_media_file(request, problem, path):
-    object = get_object_or_404(Problem, code=problem)
-    if not object.is_editable_by(request.user):
-        raise Http404()
-
-    problem_dir = problem_media_storage.path(problem)
-    if os.path.commonpath((problem_media_storage.path(os.path.join(problem, path)), problem_dir)) != problem_dir:
-        raise Http404()
-
-    response = HttpResponse()
-
-    # TODO problem media cache
-    # if hasattr(settings, 'DMOJ_PROBLEM_DATA_INTERNAL'):
-    #     url_path = '%s/%s/%s' % (settings.DMOJ_PROBLEM_DATA_INTERNAL, problem, path)
-    # else:
-    #     url_path = None
-    url_path = None
-
-    try:
-        add_file_response(request, response, url_path, os.path.join(problem, path), problem_media_storage)
     except IOError:
         raise Http404()
 
