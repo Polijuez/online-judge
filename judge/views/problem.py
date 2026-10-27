@@ -30,6 +30,7 @@ from judge.comments import CommentedDetailView
 from judge.forms import ProblemCloneForm, ProblemPointsVoteForm, ProblemSubmitForm
 from judge.models import ContestSubmission, Judge, Language, Problem, ProblemGroup, ProblemPointsVote, \
     ProblemTranslation, ProblemType, RuntimeVersion, Solution, Submission, SubmissionSource
+from judge.models.problem import generate_problem_code
 from judge.utils.diggpaginator import DiggPaginator
 from judge.utils.opengraph import generate_opengraph
 from judge.utils.pdfoid import PDF_RENDERING_ENABLED, render_pdf
@@ -801,7 +802,7 @@ class ProblemClone(ProblemMixin, PermissionRequiredMixin, TitleMixin, SingleObje
         problem.is_public = False
         problem.ac_rate = 0
         problem.user_count = 0
-        problem.code = form.cleaned_data['code']
+        problem.code = generate_problem_code()
         with revisions.create_revision(atomic=True):
             problem.save()
             problem.authors.add(self.request.profile)

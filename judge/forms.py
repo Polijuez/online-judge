@@ -15,7 +15,7 @@ from django.urls import reverse_lazy
 from django.utils.text import format_lazy
 from django.utils.translation import gettext_lazy as _, ngettext_lazy
 
-from judge.models import Contest, Language, Organization, Problem, ProblemPointsVote, Profile, Submission, \
+from judge.models import Contest, Language, Organization, ProblemPointsVote, Profile, Submission, \
     WebAuthnCredential
 from judge.utils.mail import validate_email_domain
 from judge.utils.subscription import newsletter_id
@@ -285,13 +285,7 @@ class TwoFactorLoginForm(TOTPForm):
 
 
 class ProblemCloneForm(Form):
-    code = CharField(max_length=20, validators=[RegexValidator('^[a-z0-9]+$', _('Problem code must be ^[a-z0-9]+$'))])
-
-    def clean_code(self):
-        code = self.cleaned_data['code']
-        if Problem.objects.filter(code=code).exists():
-            raise ValidationError(_('Problem with code already exists.'))
-        return code
+    """El problema clonado recibe un id nuevo generado por el servidor; no se pide nada."""
 
 
 class ContestCloneForm(Form):

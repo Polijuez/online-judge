@@ -1,9 +1,16 @@
+import importlib
+import os
+import tempfile
+from unittest import mock
+
+from django.apps import apps
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
+from django.urls import reverse
 from django.utils import timezone
 
-from judge.models import Language, LanguageLimit, Problem, Submission
-from judge.models.problem import VotePermission, disallowed_characters_validator
+from judge.models import Comment, Language, LanguageLimit, Problem, Submission
+from judge.models.problem import PROBLEM_ID_REGEX, VotePermission, disallowed_characters_validator
 from judge.models.tests.util import CommonDataMixin, create_contest, create_contest_participation, \
     create_organization, create_problem, create_problem_type, create_solution, create_user
 
@@ -450,3 +457,100 @@ class DisallowedCharactersValidatorTestCase(SimpleTestCase):
                 disallowed_characters_validator('“')
             with self.assertRaisesRegex(ValidationError, 'Disallowed characters: (?=.*‘)(?=.*’)'):
                 disallowed_characters_validator('‘’')
+
+
+class ProblemIdTestCase(CommonDataMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+
+        cls.problem = create_problem(
+            code='6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+            name='UUID problem',
+            is_public=True,
+        )
+        create_solution(problem=cls.problem)
+
+    def test_new_problem_gets_uuid(self):
+        problem = Problem(
+            name='Nuevo',
+            description='descripción',
+            group=self.problem.group,
+            time_limit=1,
+            memory_limit=65536,
+            points=1,
+        )
+        self.assertRegex(problem.code, PROBLEM_ID_REGEX)
+        problem.full_clean()
+
+    def test_short_code_is_rejected(self):
+        problem = Problem(
+            code='camellos',
+            name='Nuevo',
+            description='descripción',
+            group=self.problem.group,
+            time_limit=1,
+            memory_limit=65536,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            problem.full_clean()
+        self.assertIn('code', ctx.exception.message_dict)
+
+    def test_problem_url_uses_uuid(self):
+        response = self.client.get(reverse('problem_detail', args=[self.problem.code]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get(reverse('problem_detail', args=['camellos'])).status_code, 404)
+
+    def test_problem_pages_use_uuid(self):
+        for url_name in ('problem_editorial', 'chronological_submissions'):
+            with self.subTest(url_name=url_name):
+                response = self.client.get(reverse(url_name, args=[self.problem.code]))
+                self.assertEqual(response.status_code, 200)
+
+    def test_problem_comment_page_uses_uuid(self):
+        comment = Comment(author=self.users['normal'].profile, page='p:%s' % self.problem.code, body='hola')
+        comment.full_clean()
+        self.assertEqual(comment.page_title, self.problem.name)
+
+
+class ProblemUUIDMigrationTestCase(CommonDataMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+
+        cls.old_problems = [
+            create_problem(code='camellos'),
+            create_problem(code='pompeya'),
+        ]
+
+    def test_assign_uuids_is_idempotent_and_reports_mapping(self):
+        migration = importlib.import_module('judge.migrations.0157_problem_uuid')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = os.path.join(tmp, 'mapping.txt')
+            with mock.patch.dict(os.environ, {'DMOJ_PROBLEM_UUID_REPORT': report}):
+                migration.assign_uuids(apps, None)
+
+                with open(report, encoding='utf-8') as report_file:
+                    lines = report_file.read().splitlines()
+
+                self.assertEqual(len(lines), len(self.old_problems))
+                mapping = dict(line.split(' -> ') for line in lines)
+                self.assertCountEqual(mapping, {'camellos', 'pompeya'})
+                for old_code, new_code in mapping.items():
+                    self.assertRegex(new_code, PROBLEM_ID_REGEX)
+                    self.assertEqual(Problem.objects.get(pk=self._pk_for(old_code)).code, new_code)
+
+                first_report = lines
+                codes_after_first_run = dict(Problem.objects.values_list('pk', 'code'))
+                migration.assign_uuids(apps, None)
+
+                self.assertEqual(dict(Problem.objects.values_list('pk', 'code')), codes_after_first_run)
+                with open(report, encoding='utf-8') as report_file:
+                    self.assertEqual(report_file.read().splitlines(), first_report)
+
+        for problem in Problem.objects.filter(pk__in=[p.pk for p in self.old_problems]):
+            self.assertRegex(problem.code, PROBLEM_ID_REGEX)
+
+    def _pk_for(self, old_code):
+        return next(problem.pk for problem in self.old_problems if problem.code == old_code)

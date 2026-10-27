@@ -1,4 +1,3 @@
-import errno
 import os
 
 from django.db import models
@@ -82,18 +81,6 @@ class ProblemData(models.Model):
     def has_yml(self):
         if not self.initfile: return False
         return problem_data_storage.exists('%s/%s' % (self.problem.code, self.initfile.name))
-
-    def _update_code(self, original, new):
-        try:
-            problem_data_storage.rename(original, new)
-        except OSError as e:
-            if e.errno != errno.ENOENT:
-                raise
-        for file,_ in ProblemData.__files:
-            if getattr(self,file):
-                getattr(self,file).name = _problem_directory_file(new, getattr(self,file).name)
-        self.save()
-    _update_code.alters_data = True
 
 class ProblemTestCase(models.Model):
     dataset = models.ForeignKey('Problem', verbose_name=_('problem data set'), related_name='cases',

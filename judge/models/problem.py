@@ -1,3 +1,4 @@
+import uuid
 from enum import IntEnum
 from operator import attrgetter
 
@@ -21,6 +22,13 @@ from judge.user_translations import gettext as user_gettext
 
 __all__ = ['ProblemGroup', 'ProblemType', 'Problem', 'ProblemTranslation', 'ProblemClarification', 'License',
            'Solution', 'SubmissionSourceAccess', 'TranslatedProblemQuerySet']
+
+
+PROBLEM_ID_REGEX = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+
+def generate_problem_code():
+    return str(uuid.uuid4())
 
 
 def disallowed_characters_validator(text):
@@ -114,9 +122,10 @@ class Problem(models.Model):
         (SubmissionSourceAccess.ONLY_OWN, _('Only own submissions')),
     )
 
-    code = models.CharField(max_length=20, verbose_name=_('problem code'), unique=True,
-                            validators=[RegexValidator('^[a-z0-9]+$', _('Problem code must be ^[a-z0-9]+$'))],
-                            help_text=_('A short, unique code for the problem, used in the URL after /problem/'))
+    code = models.CharField(max_length=36, verbose_name=_('problem id'), unique=True,
+                            default=generate_problem_code,
+                            validators=[RegexValidator(PROBLEM_ID_REGEX, _('Problem id must be a UUID.'))],
+                            help_text=_('The UUID of the problem, used in the URL after /problem/'))
     name = models.CharField(max_length=100, verbose_name=_('problem name'), db_index=True,
                             help_text=_('The full name of the problem, as shown in the problem list.'),
                             validators=[disallowed_characters_validator])
@@ -184,7 +193,6 @@ class Problem(models.Model):
         super(Problem, self).__init__(*args, **kwargs)
         self._translated_name_cache = {}
         self._i18n_name = None
-        self.__original_code = self.code
 
     @cached_property
     def types_list(self):
@@ -451,18 +459,6 @@ class Problem(models.Model):
     @property
     def markdown_style(self):
         return 'problem-full' if self.is_full_markup else 'problem'
-
-    def save(self, *args, **kwargs):
-        super(Problem, self).save(*args, **kwargs)
-        if self.code != self.__original_code:
-            try:
-                problem_data = self.data_files
-            except AttributeError:
-                pass
-            else:
-                problem_data._update_code(self.__original_code, self.code)
-
-    save.alters_data = True
 
     def is_solved_by(self, user):
         # Return true if a full AC submission to the problem from the user exists.

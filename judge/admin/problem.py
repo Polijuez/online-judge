@@ -136,6 +136,7 @@ class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
         (_('History'), {'fields': ('change_message',)}),
     )
     list_display = ['code', 'name', 'show_authors', 'points', 'is_public', 'show_public']
+    readonly_fields = ('code',)
     ordering = ['code']
     search_fields = ('code', 'name', 'authors__user__username', 'curators__user__username')
     inlines = [LanguageLimitInline, ProblemClarificationInline, ProblemSolutionInline, ProblemTranslationInline]
