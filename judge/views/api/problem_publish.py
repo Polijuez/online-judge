@@ -13,7 +13,9 @@ organización dueña— para el reemplazo, con el superusuario exento.
 
 La validación y la escritura de problemas son del servicio
 ``judge.utils.problem_package``; esta vista solo traduce su resultado y sus
-errores a HTTP y aplica los límites del request antes de llamarlo.
+errores a HTTP y aplica los límites del request antes de llamarlo. Cuando la
+escritura termina, ``judge.utils.problem_propagation`` pide a los jueces que
+reescaneen su árbol; ese aviso es best-effort y no altera la respuesta.
 """
 
 import io
@@ -29,6 +31,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from judge.models import Problem
 from judge.utils.problem_package import PackageError, format_size, publish_package
+from judge.utils.problem_propagation import propagate_problem_change
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +191,7 @@ class ProblemPublishView(BasePublishView):
 
         raw = read_package(request)
         result = publish_package(raw, author=request.profile)
+        propagate_problem_change(result.problem_id)
         return publish_response(result, status=201)
 
 
@@ -207,4 +211,5 @@ class ProblemReplaceView(BasePublishView):
 
         raw = read_package(request)
         result = publish_package(raw, problem=problem)
+        propagate_problem_change(result.problem_id)
         return publish_response(result, status=200)

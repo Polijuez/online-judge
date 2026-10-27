@@ -69,6 +69,17 @@ DMOJ_PROBLEM_MAX_FILE_SIZE = None
 DMOJ_PROBLEM_PACKAGE_MAX_SIZE = 64 * 1024 * 1024  # 64 MB
 DMOJ_PROBLEM_PACKAGE_MAX_FILES = 1000
 
+# API de control de los jueces: después de publicar, el sitio hace
+# ``POST /update/problems`` en cada una de estas URLs para que el juez
+# reescanee su árbol (ADR 0008). Una entrada por juez; vacío desactiva el
+# aviso. Las direcciones son configuración de cada entorno: las setean los
+# local_settings de la orquestación.
+DMOJ_JUDGE_CONTROL_ENDPOINTS = []
+# Segundos de espera por la respuesta de cada juez. Los avisos salen en
+# paralelo, así que esto también acota cuánto puede demorar una publicación
+# con jueces caídos o colgados.
+DMOJ_JUDGE_CONTROL_TIMEOUT = 2.0
+
 DMOJ_PROBLEM_MIN_TIME_LIMIT = 0  # seconds
 DMOJ_PROBLEM_MAX_TIME_LIMIT = 60  # seconds
 DMOJ_PROBLEM_MIN_MEMORY_LIMIT = 0  # kilobytes

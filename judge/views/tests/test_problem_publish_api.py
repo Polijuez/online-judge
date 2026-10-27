@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import uuid
 import zipfile
 
@@ -13,6 +14,7 @@ from django.urls import reverse
 
 from judge.models import Problem
 from judge.models.tests.util import create_organization, create_problem, create_user
+from judge.utils.tests.fake_judge import FakeJudgeControlServer, closed_port_endpoint
 
 MANIFEST = {
     'schema': 1,
@@ -71,6 +73,10 @@ class ProblemPublishAPITestCase(TestCase):
             DMOJ_PROBLEM_MAX_FILE_SIZE=None,
             DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE=None,
             DMOJ_PROBLEM_MEDIA_MAX_FILES=None,
+            # Ningún test habla con los jueces reales: los de propagación
+            # configuran su servidor falso.
+            DMOJ_JUDGE_CONTROL_ENDPOINTS=[],
+            DMOJ_JUDGE_CONTROL_TIMEOUT=0.5,
         )
         self.settings.enable()
         self.addCleanup(self.settings.disable)
@@ -391,3 +397,56 @@ class ProblemPublishAPITestCase(TestCase):
         logged = '\n'.join(logs.output)
         self.assertNotIn(secret, logged)
         self.assertNotIn(secret, response.content.decode('utf-8'))
+
+    # -- propagación a los jueces -----------------------------------------
+
+    def test_publishing_warns_the_judges_to_rescan(self):
+        judge = FakeJudgeControlServer()
+        self.addCleanup(judge.close)
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+
+        with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url]):
+            response = self.post_package(make_package(), token)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(judge.requests, ['/update/problems'])
+
+    def test_replacing_warns_the_judges_to_rescan(self):
+        judge = FakeJudgeControlServer()
+        self.addCleanup(judge.close)
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        created = self.body(self.post_package(make_package(), token))
+
+        with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url]):
+            response = self.put_package(created['problem_id'], make_package(manifest={'title': 'Suma de dos v2'}),
+                                        token)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(judge.requests, ['/update/problems'])
+
+    def test_a_down_judge_does_not_fail_the_publish_and_is_logged(self):
+        endpoint = closed_port_endpoint()
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+
+        with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[endpoint]):
+            with self.assertLogs('judge.problem_propagation', level='WARNING') as logs:
+                response = self.post_package(make_package(), token)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(Problem.objects.filter(code=self.body(response)['problem_id']).exists())
+        self.assertIn(endpoint, '\n'.join(logs.output))
+
+    def test_a_hanging_judge_does_not_delay_the_publish_beyond_the_timeout(self):
+        judge = FakeJudgeControlServer(delay=5)
+        self.addCleanup(judge.close)
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+
+        with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url], DMOJ_JUDGE_CONTROL_TIMEOUT=0.3):
+            with self.assertLogs('judge.problem_propagation', level='INFO'):
+                started = time.monotonic()
+                response = self.post_package(make_package(), token)
+                elapsed = time.monotonic() - started
+
+        self.assertEqual(response.status_code, 201)
+        # El juez tarda 5s en contestar; la publicación no espera más que el timeout.
+        self.assertLess(elapsed, 1.0)
