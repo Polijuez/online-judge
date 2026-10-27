@@ -23,6 +23,7 @@ from django.db import transaction
 from judge.highlight_code import highlight_code
 from judge.models import Problem, ProblemData, ProblemTestCase, Submission, problem_data_storage, \
     problem_directory_file
+from judge.utils.problem_package import ProblemDataLoader
 from judge.utils.unicode import utf8text
 from judge.utils.views import TitleMixin, add_file_response
 from judge.views.problem import ProblemMixin
@@ -236,81 +237,6 @@ class ProblemSubmissionDiff(TitleMixin, ProblemMixin, DetailView):
         context['num_cases'] = num_cases
         return context
 
-class ProblemDataLoader(object):
-    def __init__(self, problem, inityml, valid_files, dry_run=False):
-        self.problem = problem
-        self.inityml = inityml
-        if isinstance(valid_files,bool):
-            self.valid_files = valid_files
-        else:
-            self.valid_files = set(valid_files)
-        self.dry_run = dry_run
-
-    def in_valid_files(self, file):
-        if isinstance(self.valid_files,bool):
-            return self.valid_files
-        return file in self.valid_files
-    
-    def load(self):
-        if 'test_cases' not in self.inityml:
-            raise ValidationError(_("test_cases must be defined in init.yml"))
-
-        if not isinstance(self.inityml['test_cases'],list):
-            raise ValidationError(_("test_cases must be a list in init.yml"))
-        
-        def _make_test_case(problem, pos, type, inp, outp, points):
-            if self.dry_run: return None
-            return ProblemTestCase(
-                dataset=problem,
-                order=pos,
-                type=type,
-                input_file=inp,
-                output_file=outp,
-                points=points
-            )
-        
-        case_data = []
-        pos = 1
-        for c, case in enumerate(self.inityml['test_cases']):
-            if 'points' not in case:
-                raise ValidationError(_("Test/batch #%d does not have points") % c)
-            if 'batched' in case:
-                case_data.append(_make_test_case(self.problem, pos, 'S', "", "", case['points']))
-                pos+=1
-                for s, subcase in enumerate(case['batched']):
-                    if 'in' not in subcase or 'out' not in subcase:
-                        raise ValidationError(_("tTest #%(case)d.%(subcase)d does not have input and output") % {
-                            "case":c,
-                            "subcase":s})
-                    if not self.in_valid_files(subcase['in']):
-                        raise ValidationError(_("Test #%(case)d.%(subcase)d: %(inp)s is not a valid file") % {
-                            "case":c,
-                            "subcase":s,
-                            "inp":subcase['in']})
-                    if not self.in_valid_files(subcase['out']):
-                        raise ValidationError(_("Test #%(case)d.%(subcase)d: %(outp)s is not a valid file") % {
-                            "case":c,
-                            "subcase":s,
-                            "outp":subcase['out']})
-                    case_data.append(_make_test_case(self.problem, pos, 'C', subcase['in'],subcase['out'],None))
-                    pos+=1
-                case_data.append(_make_test_case(self.problem, pos, 'E', "", "", None))
-                pos+=1
-            else:
-                if 'in' not in case or 'out' not in case:
-                    raise ValidationError(_("Test #%d does not have input and output") % c)
-                if not self.in_valid_files(case['in']):
-                    raise ValidationError(_("Test #%(case)d: %(inp)s is not a valid file") % {
-                        "case": c,
-                        "inp": case['in']})
-                if not self.in_valid_files(case['out']):
-                    raise ValidationError(_("Test #%(case)d: %(outp)s is not a valid file") % {
-                        "case":c,
-                        "outp":case['out']})
-                case_data.append(_make_test_case(self.problem, pos, 'C', case['in'],case['out'],case['points']))
-                pos+=1
-
-        return case_data
 
 class ProblemDataView(TitleMixin, ProblemManagerMixin):
     template_name = 'problem/data.html'
