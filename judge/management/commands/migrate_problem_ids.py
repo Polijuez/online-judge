@@ -43,24 +43,28 @@ class Command(BaseCommand):
             raise CommandError('se rehúsa a migrar: hay %d conflicto(s) de destino' % len(plan.conflicts))
 
         if not options['apply']:
-            self.stdout.write('Dry-run: no se movió nada; volvé a correr con --apply para aplicar.')
+            self.stdout.write('Dry-run: no se movió nada ni se reescribió la base; '
+                              'volvé a correr con --apply para aplicar.')
             return
 
-        pending = plan.pending
-        if not pending:
+        if not plan.pending and not plan.rewrites:
             self.stdout.write('Nada que mover: el árbol ya está migrado.')
+            self.stdout.write('Nada que reescribir: las rutas de ProblemData ya apuntan a los ids.')
+            if plan.file_skips:
+                self.stdout.write('Quedan %d archivo(s) sin resolver (ver arriba).' % len(plan.file_skips))
             self.stdout.write('Manifiesto sin cambios: %s' % manifest)
             return
 
         try:
-            moved = apply_plan(plan, manifest, on_moved=self._moved)
+            result = apply_plan(plan, manifest, on_moved=self._moved)
         except (MigrationError, OSError) as error:
             raise CommandError('%s (el manifiesto y lo ya movido quedan; volvé a correr para reanudar)'
                                % error)
 
-        self.stdout.write('Manifiesto: %s' % manifest)
-        self.stdout.write('Listo: %d problema(s) movido(s), %d en cuarentena.' % (
-            moved, len(plan.quarantine),
+        if plan.pending:
+            self.stdout.write('Manifiesto: %s' % manifest)
+        self.stdout.write('Listo: %d problema(s) movido(s), %d ruta(s) reescrita(s), %d en cuarentena.' % (
+            result.moved, result.rewritten, len(plan.quarantine),
         ))
 
     def _report(self, plan, manifest):
@@ -91,6 +95,23 @@ class Command(BaseCommand):
                 self.stdout.write('      ya migrado: %s/' % item.problem_id)
             elif item.state == STATE_MISSING:
                 self.stdout.write('      cuarentena: sin directorio de datos')
+
+        self.stdout.write('')
+        if plan.rewrites:
+            self.stdout.write('Reescrituras de ProblemData (%d):' % len(plan.rewrites))
+            for rewrite in plan.rewrites:
+                self.stdout.write('  %s  %s  %s -> %s' % (
+                    rewrite.problem_id, rewrite.field, rewrite.before, rewrite.after,
+                ))
+        else:
+            self.stdout.write('Reescrituras de ProblemData: ninguna')
+
+        if plan.file_skips:
+            self.stdout.write('Archivos que no se reescriben (%d):' % len(plan.file_skips))
+            for skip in plan.file_skips:
+                self.stdout.write('  %s  %s  %s  %s' % (
+                    skip.problem_id, skip.field, skip.path, skip.detail,
+                ))
 
         self.stdout.write('')
         if plan.quarantine:

@@ -17,16 +17,18 @@ y los directorios en cuarentena quedan donde están.
 """
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.conf import settings
+from django.db import transaction
 
-from judge.models import Problem, ProblemAlias
+from judge.models import Problem, ProblemAlias, ProblemData
 from judge.models.problem import PROBLEM_ID_REGEX
 from judge.models.problem_alias import normalize_alias
 
 __all__ = [
     'MigrationError', 'MigrationPlan', 'ProblemPlan', 'QuarantineItem', 'ManifestRow',
+    'FileRewrite', 'FileSkip', 'ApplyResult',
     'STATE_MOVE', 'STATE_DONE', 'STATE_MISSING',
     'QUARANTINE_DATA_DIR', 'QUARANTINE_MEDIA_DIR', 'QUARANTINE_PROBLEM',
     'build_plan', 'apply_plan', 'manifest_rows', 'read_manifest', 'write_manifest',
@@ -106,6 +108,32 @@ class ProblemPlan:
         return self.data is not None or self.media is not None
 
 
+@dataclass(frozen=True)
+class FileRewrite:
+    """Una ruta de ``ProblemData`` que todavía nombra el directorio viejo."""
+
+    problem_id: str
+    field: str
+    before: str
+    after: str
+
+
+@dataclass(frozen=True)
+class FileSkip:
+    """Una ruta de ``ProblemData`` que no se puede reescribir (el archivo no está)."""
+
+    problem_id: str
+    field: str
+    path: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    moved: int
+    rewritten: int
+
+
 @dataclass
 class MigrationPlan:
     data_root: str
@@ -113,6 +141,8 @@ class MigrationPlan:
     problems: list
     quarantine: list
     conflicts: list
+    rewrites: list = field(default_factory=list)
+    file_skips: list = field(default_factory=list)
 
     @property
     def moves(self):
@@ -349,13 +379,63 @@ def build_plan(data_root, media_root=None):
             ))
         plans.append(item)
 
-    return MigrationPlan(
+    plan = MigrationPlan(
         data_root=data_root,
         media_root=media_root,
         problems=plans,
         quarantine=quarantine,
         conflicts=conflicts,
     )
+    _plan_rewrites(plan)
+    return plan
+
+
+def _plan_rewrites(plan):
+    """Busca rutas de ``ProblemData`` que todavía cuelgan del directorio viejo.
+
+    Las rutas se guardan como ``<código viejo>/<archivo>``; después del
+    movimiento el archivo vive en ``<uuid>/<archivo>``. Se reescribe solo si el
+    archivo está en el árbol del problema (el de origen si se va a mover, el de
+    destino si ya está migrado) y se reporta el resto sin tocarlo. La
+    comprobación es la misma en dry-run y en aplicar: en apply los directorios
+    ya se movieron cuando se ejecuta la reescritura.
+    """
+    known = {item.problem_id: item for item in plan.problems}
+    if not known:
+        return
+
+    rows = ProblemData.objects.filter(problem__code__in=list(known)).select_related('problem')
+    for data in rows:
+        item = known[data.problem.code]
+        if item.data is not None:
+            base = item.data.source
+        elif item.state == STATE_DONE:
+            base = os.path.join(plan.data_root, item.problem_id)
+        else:
+            base = None
+
+        for name in ProblemData.get_file_fields():
+            stored = getattr(data, name)
+            value = stored.name if stored else ''
+            if not value:
+                continue
+
+            expected = '%s/%s' % (item.problem_id, os.path.basename(value))
+            if value == expected:
+                continue
+            if '/' not in value:
+                plan.file_skips.append(FileSkip(
+                    item.problem_id, name, value,
+                    'la ruta no cuelga de ningún directorio',
+                ))
+                continue
+            if base is not None and os.path.exists(os.path.join(base, os.path.basename(value))):
+                plan.rewrites.append(FileRewrite(item.problem_id, name, value, expected))
+            else:
+                plan.file_skips.append(FileSkip(
+                    item.problem_id, name, value,
+                    'el archivo no está ni en %s ni en %s' % (value, expected),
+                ))
 
 
 # ---------------------------------------------------------------------------
@@ -495,30 +575,61 @@ def _rename(move):
         ))
 
 
+def rewrite_paths(plan):
+    """Reescribe las rutas de ``ProblemData`` que apuntan al código viejo.
+
+    Usa ``update()`` a propósito: ``ProblemData.save`` borraría el archivo
+    "anterior" al detectar el cambio. Todo va en una transacción y no se escribe
+    ninguna ruta cuyo archivo no exista ya en el destino.
+    """
+    if not plan.rewrites:
+        return 0
+
+    by_problem = {}
+    for rewrite in plan.rewrites:
+        by_problem.setdefault(rewrite.problem_id, []).append(rewrite)
+
+    rewritten = 0
+    with transaction.atomic():
+        for code, rewrites in by_problem.items():
+            changes = {}
+            for rewrite in rewrites:
+                target = os.path.join(plan.data_root, rewrite.after)
+                if not os.path.exists(target):
+                    raise MigrationError('el archivo %s no existe; no se reescribe %s' % (
+                        target, rewrite.before,
+                    ))
+                changes[rewrite.field] = rewrite.after
+            if changes:
+                updated = ProblemData.objects.filter(problem__code=code).update(**changes)
+                if updated:
+                    rewritten += len(changes)
+    return rewritten
+
+
 def apply_plan(plan, manifest_path=None, on_moved=None):
-    """Aplica el plan y deja el manifiesto; devuelve cuántos problemas movió.
+    """Aplica el plan y devuelve cuántos problemas movió y cuántas rutas reescribió.
 
     El manifiesto se escribe antes de mover, así que un corte posterior deja
     registrado el mapeo. Cada ``rename`` es atómico y no se pisa un destino
-    existente; volver a correr el comando termina lo que falte.
+    existente; las rutas de ``ProblemData`` se reescriben al final, cuando los
+    archivos ya están en su lugar. Volver a correr el comando termina lo que
+    falte y no reescribe nada dos veces.
     """
     if plan.conflicts:
         raise MigrationError('el plan tiene %d conflicto(s)' % len(plan.conflicts))
 
-    pending = plan.pending
-    if not pending:
-        return 0
-
-    if manifest_path:
-        write_manifest(manifest_path, plan)
-
     moved = 0
-    for item in pending:
-        if item.data is not None:
-            _rename(item.data)
-        if item.media is not None:
-            _rename(item.media)
-        moved += 1
-        if on_moved is not None:
-            on_moved(item)
-    return moved
+    if plan.pending:
+        if manifest_path:
+            write_manifest(manifest_path, plan)
+        for item in plan.pending:
+            if item.data is not None:
+                _rename(item.data)
+            if item.media is not None:
+                _rename(item.media)
+            moved += 1
+            if on_moved is not None:
+                on_moved(item)
+
+    return ApplyResult(moved=moved, rewritten=rewrite_paths(plan))

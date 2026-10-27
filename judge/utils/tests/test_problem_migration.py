@@ -8,6 +8,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 
+from judge.models import ProblemData
 from judge.models.tests.util import create_problem
 from judge.utils import problem_migration
 from judge.utils.problem_migration import MigrationError, build_plan
@@ -124,7 +125,7 @@ class ProblemMigrationTestCase(TestCase):
 
         self.assertIn('movido  problemset/camellos -> %s' % PROBLEM_A, out)
         self.assertIn('movido  medios camellos -> %s' % PROBLEM_A, out)
-        self.assertIn('Listo: 2 problema(s) movido(s), 2 en cuarentena.', out)
+        self.assertIn('Listo: 2 problema(s) movido(s), 0 ruta(s) reescrita(s), 2 en cuarentena.', out)
 
         self.assertFalse(os.path.exists(os.path.join(self.data_root, 'problemset', 'camellos')))
         self.assertFalse(os.path.exists(os.path.join(self.media_root, 'camellos')))
@@ -247,6 +248,86 @@ class ProblemMigrationTestCase(TestCase):
         self.assertIn('el problema %s no tiene directorio de datos' % PROBLEM_DB_ONLY, out)
         self.assertTrue(os.path.isdir(os.path.join(self.media_root, 'aprendiendo')))
         self.assertFalse(os.path.exists(os.path.join(self.media_root, PROBLEM_DB_ONLY)))
+
+    # -- rutas de ProblemData -------------------------------------------
+
+    def test_rewrites_problem_data_prefixes_on_apply_and_not_twice(self):
+        problem = self.make_problem(PROBLEM_A, 'camellos', 'Camellos')
+        self.make_tree(self.data_root, 'problemset/camellos',
+                       {'data.zip': b'zip', 'init.yml': b'test_cases: []\n', 'checker.py': b'# c\n'})
+        data = ProblemData.objects.create(
+            problem=problem,
+            zipfile='camellos/data.zip',
+            initfile='camellos/init.yml',
+            checker='camellos/checker.py',
+        )
+
+        out = self.run_command()
+
+        self.assertIn('Reescrituras de ProblemData (3):', out)
+        self.assertIn('%s  zipfile  camellos/data.zip -> %s/data.zip' % (PROBLEM_A, PROBLEM_A), out)
+        self.assertIn('%s  initfile  camellos/init.yml -> %s/init.yml' % (PROBLEM_A, PROBLEM_A), out)
+        data.refresh_from_db()
+        self.assertEqual(data.zipfile.name, 'camellos/data.zip')
+        self.assertEqual(data.initfile.name, 'camellos/init.yml')
+
+        out = self.run_command(apply=True)
+
+        self.assertIn('Listo: 1 problema(s) movido(s), 3 ruta(s) reescrita(s), 0 en cuarentena.', out)
+        data.refresh_from_db()
+        self.assertEqual(data.zipfile.name, '%s/data.zip' % PROBLEM_A)
+        self.assertEqual(data.initfile.name, '%s/init.yml' % PROBLEM_A)
+        self.assertEqual(data.checker.name, '%s/checker.py' % PROBLEM_A)
+        self.assertTrue(os.path.isfile(os.path.join(self.data_root, data.zipfile.name)))
+
+        out = self.run_command(apply=True)
+
+        self.assertIn('Reescrituras de ProblemData: ninguna', out)
+        self.assertIn('Nada que reescribir', out)
+        data.refresh_from_db()
+        self.assertEqual(data.zipfile.name, '%s/data.zip' % PROBLEM_A)
+
+    def test_reports_a_problem_data_file_missing_from_both_layouts(self):
+        problem = self.make_problem(PROBLEM_A, 'camellos', 'Camellos')
+        self.make_tree(self.data_root, 'problemset/camellos', {'data.zip': b'zip'})
+        data = ProblemData.objects.create(
+            problem=problem,
+            zipfile='camellos/data.zip',
+            initfile='camellos/missing.yml',
+        )
+
+        out = self.run_command(apply=True)
+
+        self.assertIn('Listo: 1 problema(s) movido(s), 1 ruta(s) reescrita(s), 0 en cuarentena.', out)
+        self.assertIn('Archivos que no se reescriben (1):', out)
+        self.assertIn('%s  initfile  camellos/missing.yml  el archivo no está ni en '
+                      'camellos/missing.yml ni en %s/missing.yml' % (PROBLEM_A, PROBLEM_A), out)
+        data.refresh_from_db()
+        self.assertEqual(data.zipfile.name, '%s/data.zip' % PROBLEM_A)
+        self.assertEqual(data.initfile.name, 'camellos/missing.yml')
+
+    def test_rewrites_paths_when_the_tree_was_already_migrated(self):
+        problem = self.make_problem(PROBLEM_A, 'camellos', 'Camellos')
+        self.make_tree(self.data_root, PROBLEM_A, {'data.zip': b'zip', 'init.yml': b'test_cases: []\n'})
+        data = ProblemData.objects.create(
+            problem=problem,
+            zipfile='camellos/data.zip',
+            initfile='camellos/init.yml',
+        )
+
+        out = self.run_command(apply=True)
+
+        self.assertIn('Listo: 0 problema(s) movido(s), 2 ruta(s) reescrita(s), 0 en cuarentena.', out)
+        data.refresh_from_db()
+        self.assertEqual(data.zipfile.name, '%s/data.zip' % PROBLEM_A)
+        self.assertEqual(data.initfile.name, '%s/init.yml' % PROBLEM_A)
+        self.assertFalse(os.path.exists(self.manifest))
+
+        out = self.run_command(apply=True)
+
+        self.assertIn('Nada que mover: el árbol ya está migrado.', out)
+        self.assertIn('Nada que reescribir', out)
+        self.assertIn('Reescrituras de ProblemData: ninguna', out)
 
     # -- refusal ---------------------------------------------------------
 
