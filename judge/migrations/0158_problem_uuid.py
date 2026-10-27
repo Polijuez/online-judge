@@ -1,10 +1,12 @@
 # El id del problema pasa a ser un UUID: se ensancha `Problem.code`, se valida como UUID y los
 # problemas existentes reciben un uuid4. Antes de reescribir el código, cada problema migrado recibe
 # como alias su código viejo (el slug previo), así las URLs viejas siguen resolviendo; la tabla de
-# alias se crea en la migración 0157, de la que esta depende. El mapeo (id viejo -> uuid) se escribe
-# en el archivo que indique DMOJ_PROBLEM_UUID_REPORT, o en problem-uuid-mapping.txt dentro de BASE_DIR.
-# La migración es idempotente: los problemas que ya tienen un id con forma de UUID se saltean, y un
-# segundo intento no reescribe el reporte.
+# alias se crea en la migración 0157, de la que esta depende. En el mismo paso se remapean las
+# páginas `p:<code>` / `s:<code>` de `Comment` y `CommentLock`, que guardan el código como string:
+# sin eso todos los hilos de problemas y editoriales quedarían inaccesibles.
+# El mapeo (id viejo -> uuid) se escribe en el archivo que indique DMOJ_PROBLEM_UUID_REPORT, o en
+# problem-uuid-mapping.txt dentro de BASE_DIR. La migración es idempotente: los problemas que ya
+# tienen un id con forma de UUID se saltean, y un segundo intento no reescribe el reporte.
 import os
 import re
 import uuid
@@ -28,6 +30,8 @@ def report_path():
 def assign_uuids(apps, schema_editor):
     Problem = apps.get_model('judge', 'Problem')
     ProblemAlias = apps.get_model('judge', 'ProblemAlias')
+    Comment = apps.get_model('judge', 'Comment')
+    CommentLock = apps.get_model('judge', 'CommentLock')
     used = set(Problem.objects.values_list('code', flat=True))
     mapping = []
 
@@ -50,6 +54,14 @@ def assign_uuids(apps, schema_editor):
         mapping.append((old_code, new_code))
         problem.code = new_code
         problem.save(update_fields=['code'])
+
+        # Los hilos de comentarios y los bloqueos guardan la página como
+        # ``p:<code>`` / ``s:<code>``. Si no se remapean en el mismo paso, todas
+        # las conversaciones de problemas y editoriales quedan huérfanas: las
+        # filas siguen ahí pero ninguna vista las encuentra.
+        for prefix in ('p:', 's:'):
+            Comment.objects.filter(page=prefix + old_code).update(page=prefix + new_code)
+            CommentLock.objects.filter(page=prefix + old_code).update(page=prefix + new_code)
 
     if mapping:
         with open(report_path(), 'w', encoding='utf-8') as report:

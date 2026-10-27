@@ -190,8 +190,16 @@ def _read_entries(raw):
         raise _package_error('not a valid zip file (%s)' % exc, file=None)
 
     max_size = getattr(settings, 'DMOJ_PROBLEM_MAX_FILE_SIZE', None)
+    max_files = getattr(settings, 'DMOJ_PROBLEM_PACKAGE_MAX_FILES', None)
     entries = {}
     try:
+        if max_files is not None:
+            count = sum(1 for info in archive.infolist() if not info.is_dir())
+            if count > max_files:
+                raise _package_error(
+                    'the package has %d files, over the %d limit' % (count, max_files),
+                    file=None, code='too_many_files',
+                )
         for info in archive.infolist():
             name = info.filename
             if info.is_dir():
@@ -299,19 +307,15 @@ def _parse_manifest(raw):
 
     time_limit = data.get('time_limit')
     if time_limit is not None:
-        if not _is_number(time_limit) or time_limit <= 0:
-            raise _package_error('time_limit must be a positive number', file=MANIFEST_NAME)
-        time_limit = float(time_limit)
+        time_limit = _parse_time_limit(time_limit, 'time_limit')
 
     memory_limit = data.get('memory_limit')
     if memory_limit is not None:
-        if not _is_number(memory_limit) or memory_limit <= 0 or int(memory_limit) != memory_limit:
-            raise _package_error('memory_limit must be a positive integer', file=MANIFEST_NAME)
-        memory_limit = int(memory_limit)
+        memory_limit = _parse_memory_limit(memory_limit, 'memory_limit')
 
     points = data.get('points')
     if points is not None:
-        if not _is_number(points) or points < 0:
+        if not _is_number(points) or points < settings.DMOJ_PROBLEM_MIN_PROBLEM_POINTS:
             raise _package_error('points must be a non-negative number', file=MANIFEST_NAME)
         points = float(points)
 
@@ -324,6 +328,28 @@ def _parse_manifest(raw):
 
 def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _parse_time_limit(value, label):
+    """Valida un límite de tiempo contra los mismos topes que el modelo."""
+    if not _is_number(value) or value <= 0:
+        raise _package_error('%s must be a positive number' % label, file=MANIFEST_NAME)
+    value = float(value)
+    maximum = settings.DMOJ_PROBLEM_MAX_TIME_LIMIT
+    if value > maximum:
+        raise _package_error('%s is over the %ss limit' % (label, maximum), file=MANIFEST_NAME)
+    return value
+
+
+def _parse_memory_limit(value, label):
+    """Valida un límite de memoria contra los mismos topes que el modelo."""
+    if not _is_number(value) or value <= 0 or int(value) != value:
+        raise _package_error('%s must be a positive integer' % label, file=MANIFEST_NAME)
+    value = int(value)
+    maximum = settings.DMOJ_PROBLEM_MAX_MEMORY_LIMIT
+    if value > maximum:
+        raise _package_error('%s is over the %sKB limit' % (label, maximum), file=MANIFEST_NAME)
+    return value
 
 
 def _parse_aliases(value):
@@ -383,13 +409,9 @@ def _parse_limits(value):
             raise _package_error(
                 'unknown key(s) in limits.%s: %s' % (extension, ', '.join(unknown)), file=MANIFEST_NAME,
             )
-        time_limit = limit.get('tl')
-        memory_limit = limit.get('ml')
-        if not _is_number(time_limit) or time_limit <= 0:
-            raise _package_error('limits.%s.tl must be a positive number' % extension, file=MANIFEST_NAME)
-        if not _is_number(memory_limit) or memory_limit <= 0 or int(memory_limit) != memory_limit:
-            raise _package_error('limits.%s.ml must be a positive integer' % extension, file=MANIFEST_NAME)
-        limits[normalized] = (float(time_limit), int(memory_limit))
+        time_limit = _parse_time_limit(limit.get('tl'), 'limits.%s.tl' % normalized)
+        memory_limit = _parse_memory_limit(limit.get('ml'), 'limits.%s.ml' % normalized)
+        limits[normalized] = (time_limit, memory_limit)
     return limits
 
 
@@ -470,6 +492,11 @@ def _validate_optional_files(entries, init_yml):
             )
         files[reference] = entries[reference]
         fields[field] = reference
+
+    # La ruta vieja exigía el par: el juez no puede correr una firma sin su
+    # evaluador, así que aceptarla sería publicar un problema que no califica.
+    if 'signature' in fields and 'evaluator' not in fields:
+        raise _package_error('signature requires an evaluator', file=fields['signature'])
 
     return files, fields
 
@@ -636,6 +663,13 @@ def load_case_specs(inityml, valid_files):
                         'case': c,
                         'subcase': s,
                     })
+                # Un ``in: [1.in]`` no es un nombre de archivo; sin este chequeo
+                # el valor crudo termina hasheado y levanta TypeError.
+                if not isinstance(subcase['in'], str) or not isinstance(subcase['out'], str):
+                    raise ValidationError(_('Test #%(case)d.%(subcase)d: input and output must be file names') % {
+                        'case': c,
+                        'subcase': s,
+                    })
                 if not is_valid(subcase['in']):
                     raise ValidationError(_('Test #%(case)d.%(subcase)d: %(inp)s is not a valid file') % {
                         'case': c,
@@ -656,6 +690,8 @@ def load_case_specs(inityml, valid_files):
         else:
             if 'in' not in case or 'out' not in case:
                 raise ValidationError(_('Test #%d does not have input and output') % c)
+            if not isinstance(case['in'], str) or not isinstance(case['out'], str):
+                raise ValidationError(_('Test #%d: input and output must be file names') % c)
             if not is_valid(case['in']):
                 raise ValidationError(_('Test #%(case)d: %(inp)s is not a valid file') % {
                     'case': c,
@@ -828,6 +864,7 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
     manifest = package.manifest
     group = _resolve_group(manifest.group, warnings)
     types = _resolve_types(manifest.types, warnings)
+    previous = None if created else (problem.points, problem.is_public)
 
     if created:
         problem.code = problem.code or str(uuid.uuid4())
@@ -856,6 +893,12 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
         if manifest.points is not None:
             problem.points = manifest.points
         problem.save()
+        if previous != (problem.points, problem.is_public):
+            # El admin reencola por los mismos campos: los envíos guardan los
+            # puntos del problema y los perfiles su total, y ninguno se entera
+            # de un reemplazo si no se recalculan.
+            from judge.tasks import rescore_problem
+            transaction.on_commit(rescore_problem.s(problem.pk).delay)
 
     problem.types.set(types)
 
@@ -923,14 +966,33 @@ def _check_alias_conflicts(manifest, problem):
         )
 
 
-def publish_package(source, problem=None, author=None):
+def _check_public_visibility(manifest, user):
+    """Exige el permiso de visibilidad del admin para publicar como público.
+
+    El servicio es el único camino de escritura, así que el chequeo vive acá:
+    una publicación con ``visibility: public`` sin ``user`` también se rechaza,
+    en vez de confiar en que cada llamador se acuerde de mirar el manifiesto.
+    """
+    if not manifest.is_public:
+        return
+    if user is None or not (user.is_superuser or user.has_perm('judge.change_public_visibility')):
+        raise _package_error(
+            'publishing a public problem requires the change_public_visibility permission',
+            file=MANIFEST_NAME, code='forbidden',
+        )
+
+
+def publish_package(source, problem=None, author=None, user=None):
     """Publica ``source`` (bytes, archivo o camino a un zip) en ``problem``.
 
     Con ``problem=None`` crea un problema nuevo y deja a ``author`` (un
-    ``Profile``) como autor; si no, reemplaza el paquete vigente. Valida todo
-    antes de tocar disco o base y escribe los árboles de datos y medios en
-    directorios temporales de la misma raíz, intercambiándolos recién al final.
-    Ante cualquier fallo, el paquete anterior queda intacto.
+    ``Profile``) como autor; si no, reemplaza el paquete vigente. ``user`` es
+    quien publica y debe tener ``judge.change_public_visibility`` si el
+    manifiesto declara el problema público, la misma regla que el admin.
+
+    Valida todo antes de tocar disco o base y escribe los árboles de datos y
+    medios en directorios temporales de la misma raíz, intercambiándolos recién
+    al final. Ante cualquier fallo, el paquete anterior queda intacto.
 
     Devuelve un :class:`PublishResult`. Los errores de validación son
     :class:`PackageError` y nombran el archivo y el motivo.
@@ -938,6 +1000,7 @@ def publish_package(source, problem=None, author=None):
     package = _load_package(source)
     manifest = package.manifest
 
+    _check_public_visibility(manifest, user)
     _check_alias_conflicts(manifest, problem)
 
     specs = load_case_specs(package.init_yml, _read_nested_archive(

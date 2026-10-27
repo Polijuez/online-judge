@@ -36,7 +36,8 @@ def yaml_dump(data):
     return yaml.safe_dump(data).encode('utf-8')
 
 
-def make_package(manifest=None, init=INIT_YML, statement='# Enunciado\n', cases=None, media=None, omit=()):
+def make_package(manifest=None, init=INIT_YML, statement='# Enunciado\n', cases=None, media=None, omit=(),
+                 extra=None):
     data = dict(MANIFEST)
     data.update(manifest or {})
 
@@ -54,6 +55,8 @@ def make_package(manifest=None, init=INIT_YML, statement='# Enunciado\n', cases=
                 for name, content in (cases or {'1.in': b'1 2\n', '1.out': b'3\n'}).items():
                     case_archive.writestr(name, content)
             archive.writestr('data.zip', case_buffer.getvalue())
+        for name, content in (extra or {}).items():
+            archive.writestr(name, content)
         for name, content in (media or {}).items():
             archive.writestr('media/' + name, content)
     return buffer.getvalue()
@@ -108,7 +111,7 @@ class ProblemPublishAPITestCase(TestCase):
     # -- alta -------------------------------------------------------------
 
     def test_create_returns_201_with_the_uuid_and_what_was_written(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         raw = make_package(media={'figura.png': b'png'})
 
         response = self.post_package(raw, token)
@@ -155,7 +158,7 @@ class ProblemPublishAPITestCase(TestCase):
     # -- reemplazo --------------------------------------------------------
 
     def test_replace_returns_200_with_the_change_summary(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         created = self.body(self.post_package(make_package(), token))
 
         raw = make_package(manifest={'title': 'Suma de dos (v2)', 'aliases': ['suma-de-dos', 'suma-v2']})
@@ -172,7 +175,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertTrue(problem.aliases.filter(name='suma-v2').exists())
 
     def test_replace_is_idempotent(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         created = self.body(self.post_package(make_package(), token))
         raw = make_package(manifest={'title': 'Suma de dos v2'})
 
@@ -187,7 +190,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(Problem.objects.get(code=created['problem_id']).name, 'Suma de dos v2')
 
     def test_replace_of_a_missing_problem_is_404(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         response = self.put_package(str(uuid.uuid4()), make_package(), token)
 
@@ -195,7 +198,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(self.body(response)['error']['code'], 'not_found')
 
     def test_replace_with_a_non_uuid_id_is_404(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         response = self.put_package('not-a-uuid', make_package(), token)
 
@@ -213,7 +216,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertNothingWritten()
 
     def test_session_without_a_token_gets_401(self):
-        user = create_user(username='problemsetter', user_permissions=('edit_own_problem',))
+        user = create_user(username='problemsetter', user_permissions=('edit_own_problem', 'change_public_visibility'))
         self.client.force_login(user)
 
         response = self.post_package(make_package())
@@ -222,7 +225,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertNothingWritten()
 
     def test_invalid_token_gets_401(self):
-        user = create_user(username='problemsetter', user_permissions=('edit_own_problem',))
+        user = create_user(username='problemsetter', user_permissions=('edit_own_problem', 'change_public_visibility'))
         token = 'Bearer ' + 'A' * 48
 
         response = self.post_package(make_package(), token)
@@ -240,9 +243,9 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertNothingWritten()
 
     def test_replace_of_a_problem_you_do_not_edit_gets_403(self):
-        owner, owner_token = self.user_with_token('owner', ('edit_own_problem',))
+        owner, owner_token = self.user_with_token('owner', ('edit_own_problem', 'change_public_visibility'))
         created = self.body(self.post_package(make_package(), owner_token))
-        other, other_token = self.user_with_token('other', ('edit_own_problem',))
+        other, other_token = self.user_with_token('other', ('edit_own_problem', 'change_public_visibility'))
 
         response = self.put_package(created['problem_id'], make_package(), other_token)
 
@@ -254,14 +257,14 @@ class ProblemPublishAPITestCase(TestCase):
         create_organization(name='club')
         problem = create_problem(code=str(uuid.uuid4()), is_organization_private=True,
                                  organizations=['club'])
-        outsider, outsider_token = self.user_with_token('outsider', ('edit_own_problem',))
+        outsider, outsider_token = self.user_with_token('outsider', ('edit_own_problem', 'change_public_visibility'))
 
         forbidden = self.put_package(problem.code, make_package(), outsider_token)
 
         self.assertEqual(forbidden.status_code, 403)
         self.assertFalse(problem.aliases.exists())
 
-        admin, admin_token = self.user_with_token('club-admin', ('edit_own_problem',))
+        admin, admin_token = self.user_with_token('club-admin', ('edit_own_problem', 'change_public_visibility'))
         problem.organizations.first().admins.add(admin.profile)
 
         allowed = self.put_package(problem.code, make_package(), admin_token)
@@ -269,10 +272,45 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertTrue(self.body(allowed)['changed'])
 
+    def test_public_publish_without_change_public_visibility_gets_403(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+
+        response = self.post_package(make_package(), token)
+
+        self.assertEqual(response.status_code, 403)
+        error = self.body(response)['error']
+        self.assertEqual(error['code'], 'forbidden')
+        self.assertEqual(error['file'], 'problem.yml')
+        self.assertIn('change_public_visibility', error['reason'])
+        self.assertNothingWritten()
+
+    def test_replace_public_without_change_public_visibility_gets_403(self):
+        user = create_user(username='problemsetter', user_permissions=('edit_own_problem',))
+        problem = create_problem(code=str(uuid.uuid4()), authors=['problemsetter'])
+        token = 'Bearer ' + user.profile.generate_api_token()
+
+        response = self.put_package(problem.code, make_package(), token)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.body(response)['error']['code'], 'forbidden')
+        problem.refresh_from_db()
+        self.assertEqual(problem.name, problem.code)
+        self.assertFalse(problem.aliases.exists())
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_private_publish_needs_no_change_public_visibility(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+
+        response = self.post_package(make_package(manifest={'visibility': 'private'}), token)
+
+        self.assertEqual(response.status_code, 201)
+        problem = Problem.objects.get(code=self.body(response)['problem_id'])
+        self.assertFalse(problem.is_public)
+
     # -- errores de validación -------------------------------------------
 
     def test_unknown_manifest_schema_gets_422_with_the_reason(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         response = self.post_package(make_package(manifest={'schema': 2}), token)
 
@@ -284,7 +322,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertNothingWritten()
 
     def test_a_manifest_without_schema_is_a_malformed_package(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         raw = make_package()
         # Saca el schema del manifiesto sin tocar el resto del zip.
         buffer = io.BytesIO()
@@ -306,7 +344,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertNothingWritten()
 
     def test_invalid_package_names_the_offending_file(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         raw = make_package(omit=('init.yml',))
 
         response = self.post_package(raw, token)
@@ -317,8 +355,32 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertIn('missing required file', error['reason'])
         self.assertNothingWritten()
 
+    def test_a_non_string_case_file_gets_400_with_the_reason(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        raw = make_package(init=b'archive: data.zip\ntest_cases:\n- points: 100\n  in: [1.in]\n  out: 1.out\n')
+
+        response = self.post_package(raw, token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['file'], 'init.yml')
+        self.assertIn('must be file names', error['reason'])
+        self.assertNothingWritten()
+
+    def test_signature_without_evaluator_gets_400_with_the_reason(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        raw = make_package(extra={'signature.hpp': b'int firma();'})
+
+        response = self.post_package(raw, token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['file'], 'signature.hpp')
+        self.assertIn('evaluator', error['reason'])
+        self.assertNothingWritten()
+
     def test_a_non_zip_body_is_rejected_without_writing(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         response = self.post_package(b'not a zip at all', token)
 
@@ -330,7 +392,7 @@ class ProblemPublishAPITestCase(TestCase):
 
     @override_settings(DMOJ_PROBLEM_PACKAGE_MAX_SIZE=100)
     def test_oversized_request_is_rejected_without_writing(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         raw = make_package()
         self.assertGreater(len(raw), 100)
 
@@ -344,7 +406,7 @@ class ProblemPublishAPITestCase(TestCase):
 
     @override_settings(DMOJ_PROBLEM_PACKAGE_MAX_FILES=2)
     def test_too_many_files_is_rejected_without_writing(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         raw = make_package(media={'figura.png': b'png'})
 
         response = self.post_package(raw, token)
@@ -356,7 +418,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertNothingWritten()
 
     def test_empty_body_is_rejected(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         response = self.post_package(b'', token)
 
@@ -367,7 +429,7 @@ class ProblemPublishAPITestCase(TestCase):
     # -- métodos ----------------------------------------------------------
 
     def test_other_methods_are_rejected(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         created = self.body(self.post_package(make_package(), token))
         headers = {'HTTP_AUTHORIZATION': token}
 
@@ -387,7 +449,7 @@ class ProblemPublishAPITestCase(TestCase):
     # -- logging ----------------------------------------------------------
 
     def test_the_token_is_not_logged_nor_echoed(self):
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         secret = token.split(' ', 1)[1]
 
         with self.assertLogs(level='INFO') as logs:
@@ -403,7 +465,7 @@ class ProblemPublishAPITestCase(TestCase):
     def test_publishing_warns_the_judges_to_rescan(self):
         judge = FakeJudgeControlServer()
         self.addCleanup(judge.close)
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url]):
             response = self.post_package(make_package(), token)
@@ -414,7 +476,7 @@ class ProblemPublishAPITestCase(TestCase):
     def test_replacing_warns_the_judges_to_rescan(self):
         judge = FakeJudgeControlServer()
         self.addCleanup(judge.close)
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         created = self.body(self.post_package(make_package(), token))
 
         with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url]):
@@ -426,7 +488,7 @@ class ProblemPublishAPITestCase(TestCase):
 
     def test_a_down_judge_does_not_fail_the_publish_and_is_logged(self):
         endpoint = closed_port_endpoint()
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[endpoint]):
             with self.assertLogs('judge.problem_propagation', level='WARNING') as logs:
@@ -439,7 +501,7 @@ class ProblemPublishAPITestCase(TestCase):
     def test_a_hanging_judge_does_not_delay_the_publish_beyond_the_timeout(self):
         judge = FakeJudgeControlServer(delay=5)
         self.addCleanup(judge.close)
-        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
 
         with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url], DMOJ_JUDGE_CONTROL_TIMEOUT=0.3):
             with self.assertLogs('judge.problem_propagation', level='INFO'):

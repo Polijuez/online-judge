@@ -8,6 +8,7 @@ from unittest import mock
 from django.test import TestCase, override_settings
 
 from judge.models import Language, LanguageLimit, Problem, ProblemData, ProblemTestCase
+from judge.models.tests.util import create_user
 from judge.utils import problem_package
 from judge.utils.problem_package import PackageError, publish_package
 
@@ -106,9 +107,12 @@ class ProblemPackageTestCase(TestCase):
         )
         self.settings.enable()
         self.addCleanup(self.settings.disable)
+        # Publicar un manifiesto público exige el permiso de visibilidad.
+        self.publisher = create_user(username='publisher', is_superuser=True)
 
-    def publish(self, raw, problem=None):
-        return publish_package(raw, problem=problem)
+    def publish(self, raw, problem=None, user=None):
+        return publish_package(raw, problem=problem,
+                               user=self.publisher if user is None else user)
 
     def test_publish_valid_package(self):
         raw = package(media={'figura.png': b'png'})
@@ -335,3 +339,146 @@ class ProblemPackageTestCase(TestCase):
         self.assertIn('too big', caught.exception.reason)
         self.assertEqual(Problem.objects.count(), 0)
         self.assertFalse(os.path.exists(self.data_root))
+
+    # -- visibilidad -------------------------------------------------------
+
+    def test_public_manifest_requires_change_public_visibility(self):
+        editor = create_user(username='editor', user_permissions=('edit_own_problem',))
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(), user=editor)
+
+        self.assertEqual(caught.exception.code, 'forbidden')
+        self.assertIn('change_public_visibility', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_private_manifest_needs_no_visibility_permission(self):
+        editor = create_user(username='editor', user_permissions=('edit_own_problem',))
+
+        result = self.publish(package(manifest=yaml_manifest({'visibility': 'private'})), user=editor)
+
+        self.assertFalse(Problem.objects.get(code=result.problem_id).is_public)
+
+    def test_change_public_visibility_lets_a_plain_editor_publish_public(self):
+        editor = create_user(username='editor',
+                             user_permissions=('edit_own_problem', 'change_public_visibility'))
+
+        result = self.publish(package(), user=editor)
+
+        self.assertTrue(Problem.objects.get(code=result.problem_id).is_public)
+
+    # -- límites del manifiesto -------------------------------------------
+
+    def test_time_limit_over_the_model_maximum_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'time_limit': 61})))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('time_limit is over the 60s limit', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_memory_limit_over_the_model_maximum_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'memory_limit': 1048577})))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('memory_limit is over the 1048576KB limit', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_extension_limit_over_the_model_maximum_is_rejected(self):
+        manifest = yaml_manifest({'limits': {'.cpp': {'tl': 61, 'ml': 262144}}})
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=manifest))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('limits.cpp.tl is over the 60s limit', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    # -- archivos del juez y de casos -------------------------------------
+
+    @override_settings(DMOJ_PROBLEM_PACKAGE_MAX_FILES=3)
+    def test_too_many_files_is_rejected_by_the_service(self):
+        # El paquete mínimo ya tiene cuatro archivos: manifiesto, init,
+        # enunciado y el zip de casos.
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package())
+
+        self.assertEqual(caught.exception.code, 'too_many_files')
+        self.assertIn('over the 3 limit', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_non_string_case_file_is_a_package_error(self):
+        init = b'archive: data.zip\ntest_cases:\n- points: 100\n  in: [1.in]\n  out: 1.out\n'
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init))
+
+        self.assertEqual(caught.exception.file, 'init.yml')
+        self.assertIn('must be file names', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_batched_non_string_case_file_is_a_package_error(self):
+        init = (b'archive: data.zip\ntest_cases:\n- points: 100\n'
+                b'  batched:\n  - {in: {nombre: 1.in}, out: 1.out}\n')
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init))
+
+        self.assertEqual(caught.exception.file, 'init.yml')
+        self.assertIn('must be file names', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_signature_requires_an_evaluator(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(extra={'signature.hpp': b'int firma();'}))
+
+        self.assertEqual(caught.exception.file, 'signature.hpp')
+        self.assertIn('evaluator', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_signature_with_its_evaluator_is_accepted(self):
+        result = self.publish(package(extra={
+            'signature.hpp': b'int firma();',
+            'evaluator.cpp': b'int main() { return 0; }',
+        }))
+
+        data = ProblemData.objects.get(problem__code=result.problem_id)
+        self.assertTrue(data.signature_grading)
+        self.assertTrue(data.signature.name.endswith('/signature.hpp'))
+        self.assertTrue(data.evaluator.name.endswith('/evaluator.cpp'))
+
+    # -- rescore -----------------------------------------------------------
+
+    def test_changing_points_or_visibility_triggers_a_rescore(self):
+        problem = Problem.objects.get(code=self.publish(package()).problem_id)
+
+        with mock.patch('judge.tasks.rescore_problem') as task:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.publish(package(manifest=yaml_manifest({'points': 50})), problem=problem)
+
+        task.s.assert_called_once_with(problem.pk)
+        task.s.return_value.delay.assert_called_once_with()
+
+        with mock.patch('judge.tasks.rescore_problem') as task:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.publish(package(manifest=yaml_manifest({'visibility': 'private'})), problem=problem)
+
+        task.s.assert_called_once_with(problem.pk)
+        task.s.return_value.delay.assert_called_once_with()
+
+    def test_a_cases_only_change_does_not_trigger_a_rescore(self):
+        problem = Problem.objects.get(code=self.publish(package()).problem_id)
+        init = b'archive: data.zip\ntest_cases:\n- points: 10\n  in: 9.in\n  out: 9.out\n'
+
+        with mock.patch('judge.tasks.rescore_problem') as task:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.publish(package(init=init, cases={'9.in': b'9\n', '9.out': b'9\n'}),
+                             problem=problem)
+
+        task.s.assert_not_called()
+        self.assertEqual(list(problem.cases.values_list('input_file', flat=True)), ['9.in'])

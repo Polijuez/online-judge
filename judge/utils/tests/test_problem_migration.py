@@ -2,14 +2,15 @@ import io
 import os
 import shutil
 import tempfile
+from importlib import import_module
 from unittest import mock
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 
-from judge.models import ProblemData
-from judge.models.tests.util import create_problem
+from judge.models import Comment, CommentLock, Problem, ProblemAlias, ProblemData
+from judge.models.tests.util import create_problem, create_user
 from judge.utils import problem_migration
 from judge.utils.problem_migration import MigrationError, build_plan
 
@@ -393,3 +394,77 @@ class ProblemMigrationTestCase(TestCase):
     def test_missing_data_root_is_an_error(self):
         with self.assertRaises(CommandError):
             self.run_command(data_root=os.path.join(self.tmp, 'nope'))
+
+
+class _CurrentModels:
+    """Registro mínimo para correr el ``RunPython`` con los modelos de hoy."""
+
+    models = {
+        'problem': Problem,
+        'problemalias': ProblemAlias,
+        'comment': Comment,
+        'commentlock': CommentLock,
+    }
+
+    def get_model(self, app_label, model_name):
+        return self.models[model_name.lower()]
+
+
+class CommentPageMigrationTestCase(TestCase):
+    def test_comment_and_lock_pages_follow_the_new_problem_uuid(self):
+        user = create_user(username='commenter')
+        problem = create_problem(code='suma-de-dos', name='Suma de dos', is_public=True)
+        author = user.profile
+        Comment.objects.create(author=author, page='p:suma-de-dos', body='hilo del problema')
+        Comment.objects.create(author=author, page='s:suma-de-dos', body='hilo de la editorial')
+        Comment.objects.create(author=author, page='p:fantasma', body='página sin problema')
+        Comment.objects.create(author=author, page='b:1', body='comentario de blog')
+        CommentLock.objects.create(page='p:suma-de-dos')
+        CommentLock.objects.create(page='s:suma-de-dos')
+        CommentLock.objects.create(page='p:fantasma')
+
+        migration = import_module('judge.migrations.0158_problem_uuid')
+        report = os.path.join(tempfile.mkdtemp(prefix='uuid-report-'), 'mapping.txt')
+        self.addCleanup(shutil.rmtree, os.path.dirname(report), ignore_errors=True)
+        with mock.patch.dict(os.environ, {'DMOJ_PROBLEM_UUID_REPORT': report}):
+            migration.assign_uuids(_CurrentModels(), None)
+
+        problem.refresh_from_db()
+        self.assertRegex(problem.code, r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        new_code = problem.code
+
+        # Los hilos ahora cuelgan del uuid y el problema los resuelve.
+        thread = Comment.objects.get(page='p:' + new_code)
+        self.assertTrue(thread.is_accessible_by(user))
+        self.assertTrue(Comment.objects.filter(page='s:' + new_code).exists())
+        self.assertEqual(CommentLock.objects.filter(page='p:' + new_code).count(), 1)
+        self.assertEqual(CommentLock.objects.filter(page='s:' + new_code).count(), 1)
+        self.assertFalse(Comment.objects.filter(page__in=['p:suma-de-dos', 's:suma-de-dos']).exists())
+
+        # Las páginas ajenas al problema quedan intactas.
+        self.assertTrue(Comment.objects.filter(page='p:fantasma').exists())
+        self.assertTrue(Comment.objects.filter(page='b:1').exists())
+        self.assertTrue(CommentLock.objects.filter(page='p:fantasma').exists())
+
+        with open(report, encoding='utf-8') as handle:
+            self.assertEqual(handle.read(), 'suma-de-dos -> %s\n' % new_code)
+
+    def test_rerunning_the_migration_keeps_the_pages_where_they_are(self):
+        user = create_user(username='commenter')
+        problem = create_problem(code='suma-de-dos', name='Suma de dos')
+        Comment.objects.create(author=user.profile, page='p:suma-de-dos', body='hilo')
+        CommentLock.objects.create(page='p:suma-de-dos')
+
+        migration = import_module('judge.migrations.0158_problem_uuid')
+        report = os.path.join(tempfile.mkdtemp(prefix='uuid-report-'), 'mapping.txt')
+        self.addCleanup(shutil.rmtree, os.path.dirname(report), ignore_errors=True)
+        with mock.patch.dict(os.environ, {'DMOJ_PROBLEM_UUID_REPORT': report}):
+            migration.assign_uuids(_CurrentModels(), None)
+            problem.refresh_from_db()
+            first_code = problem.code
+            migration.assign_uuids(_CurrentModels(), None)
+
+        problem.refresh_from_db()
+        self.assertEqual(problem.code, first_code)
+        self.assertEqual(Comment.objects.filter(page='p:' + first_code).count(), 1)
+        self.assertEqual(CommentLock.objects.filter(page='p:' + first_code).count(), 1)

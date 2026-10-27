@@ -9,7 +9,10 @@ La autenticación es el token Bearer por usuario que ya resuelve
 ``judge.middleware.APIMiddleware`` (acá solo se exige que haya pasado). La
 autorización reutiliza las reglas del sitio: ``judge.edit_own_problem`` para el
 alta y ``Problem.is_editable_by`` —autores, curadores y administradores de la
-organización dueña— para el reemplazo, con el superusuario exento.
+organización dueña— para el reemplazo, con el superusuario exento. Publicar un
+manifiesto con ``visibility: public`` exige además
+``judge.change_public_visibility``, igual que el admin; el chequeo lo hace el
+servicio, así que el formulario de staff aplica la misma regla.
 
 La validación y la escritura de problemas son del servicio
 ``judge.utils.problem_package``; esta vista solo traduce su resultado y sus
@@ -18,9 +21,7 @@ escritura termina, ``judge.utils.problem_propagation`` pide a los jueces que
 reescaneen su árbol; ese aviso es best-effort y no altera la respuesta.
 """
 
-import io
 import logging
-import zipfile
 
 from django.conf import settings
 from django.http import JsonResponse
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 # Códigos del servicio que no son un paquete inválido.
 _ERROR_STATUS = {
     'unsupported_schema': 422,
+    # El servicio también cuenta archivos (el formulario de staff comparte el
+    # mismo límite); es un request demasiado grande, no un paquete mal formado.
+    'too_many_files': 413,
+    'forbidden': 403,
 }
 
 
@@ -61,19 +66,6 @@ def publish_error_response(error):
                           status=_ERROR_STATUS.get(error.code, 400))
 
 
-def count_package_files(raw):
-    """Cantidad de archivos regulares del zip, o ``None`` si no es un zip.
-
-    Cuando el cuerpo no es un zip no se cuenta: el servicio lo rechaza con el
-    motivo correcto y el archivo culpable.
-    """
-    try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            return sum(1 for info in archive.infolist() if not info.is_dir())
-    except (zipfile.BadZipFile, OSError, ValueError):
-        return None
-
-
 def declared_length(request):
     """Tamaño anunciado del cuerpo, o ``None`` si el request no lo declara."""
     try:
@@ -86,8 +78,9 @@ def read_package(request):
     """Lee el zip del cuerpo respetando los límites antes de publicar.
 
     El tamaño declarado se compara antes de leer; el real después. La cantidad
-    de archivos se cuenta sobre el zip en memoria. Nada de esto toca disco ni
-    base: el paquete llega al servicio solo si pasa los límites.
+    de archivos la cuenta el servicio, que es el camino compartido con el
+    formulario de staff. Nada de esto toca disco ni base: el paquete llega al
+    servicio solo si pasa los límites.
     """
     max_size = getattr(settings, 'DMOJ_PROBLEM_PACKAGE_MAX_SIZE', None)
     declared = declared_length(request)
@@ -112,14 +105,6 @@ def read_package(request):
             'the request body is %s, over the %s limit' % (format_size(len(raw)), format_size(max_size)),
         )
 
-    max_files = getattr(settings, 'DMOJ_PROBLEM_PACKAGE_MAX_FILES', None)
-    if max_files is not None:
-        files = count_package_files(raw)
-        if files is not None and files > max_files:
-            raise RequestLimitError(
-                'too_many_files',
-                'the package has %d files, over the %d limit' % (files, max_files),
-            )
     return raw
 
 
@@ -190,7 +175,7 @@ class ProblemPublishView(BasePublishView):
             return error_response('forbidden', 'you cannot create problems', status=403)
 
         raw = read_package(request)
-        result = publish_package(raw, author=request.profile)
+        result = publish_package(raw, author=request.profile, user=user)
         propagate_problem_change(result.problem_id)
         return publish_response(result, status=201)
 
@@ -210,6 +195,6 @@ class ProblemReplaceView(BasePublishView):
             return error_response('forbidden', 'you cannot edit problem %s' % problem_id, status=403)
 
         raw = read_package(request)
-        result = publish_package(raw, problem=problem)
+        result = publish_package(raw, problem=problem, user=user)
         propagate_problem_change(result.problem_id)
         return publish_response(result, status=200)

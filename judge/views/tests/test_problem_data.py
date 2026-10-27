@@ -13,6 +13,7 @@ from django.urls import reverse
 
 from judge.models import ProblemData
 from judge.models.tests.util import create_problem, create_user
+from judge.utils.tests.fake_judge import FakeJudgeControlServer
 
 MANIFEST = {
     'schema': 1,
@@ -88,7 +89,8 @@ class ProblemDataViewTestCase(TestCase):
         self.settings.enable()
         self.addCleanup(self.settings.disable)
 
-        self.user = create_user(username='problemsetter', user_permissions=('edit_own_problem',))
+        self.user = create_user(username='problemsetter',
+                                user_permissions=('edit_own_problem', 'change_public_visibility'))
         self.token = 'Bearer ' + self.user.profile.generate_api_token()
         self.client.force_login(self.user)
 
@@ -202,6 +204,42 @@ class ProblemDataViewTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'not a valid zip file')
         self.assertFalse(os.path.exists(os.path.join(self.data_root, problem.code)))
+
+    # -- permisos y límites ------------------------------------------------
+
+    def test_publishing_public_without_the_permission_shows_the_reason(self):
+        plain = create_user(username='plain', user_permissions=('edit_own_problem',))
+        problem = create_problem(code=str(uuid.uuid4()), name='Plantilla', authors=['plain'])
+        self.client.force_login(plain)
+
+        response = self.post_package(problem, make_package())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'change_public_visibility')
+        self.assertFalse(os.path.exists(os.path.join(self.data_root, problem.code)))
+        self.assertEqual(problem.cases.count(), 0)
+
+    @override_settings(DMOJ_PROBLEM_PACKAGE_MAX_FILES=3)
+    def test_the_file_limit_is_enforced_by_the_form(self):
+        problem = self.make_problem()
+
+        response = self.post_package(problem, make_package())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'over the 3 limit')
+        self.assertFalse(os.path.exists(os.path.join(self.data_root, problem.code)))
+        self.assertEqual(problem.cases.count(), 0)
+
+    def test_publishing_by_form_warns_the_judges(self):
+        judge = FakeJudgeControlServer()
+        self.addCleanup(judge.close)
+        problem = self.make_problem()
+
+        with override_settings(DMOJ_JUDGE_CONTROL_ENDPOINTS=[judge.url]):
+            response = self.post_package(problem, make_package())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(judge.requests, ['/update/problems'])
 
     # -- pantalla de medios ------------------------------------------------
 

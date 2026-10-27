@@ -18,6 +18,7 @@ from django.views.generic import DetailView
 from judge.highlight_code import highlight_code
 from judge.models import Problem, ProblemTestCase, Submission, problem_data_storage
 from judge.utils.problem_package import PackageError, format_size, publish_package
+from judge.utils.problem_propagation import propagate_problem_change
 from judge.utils.unicode import utf8text
 from judge.utils.views import TitleMixin, add_file_response
 from judge.views.problem import ProblemMixin
@@ -178,12 +179,15 @@ class ProblemDataView(TitleMixin, ProblemManagerMixin):
                 # El servicio valida y escribe: el formulario no arma ni toca
                 # archivos por su cuenta.
                 result = publish_package(form.cleaned_data['package'], problem=problem,
-                                         author=request.user.profile)
+                                         author=request.user.profile, user=request.user)
             except PackageError as error:
                 form.add_error('package', error)
         context = self.get_context_data(form=form)
         if result is not None:
             context['result'] = result
+            # El paquete ya está commiteado; los jueces tienen que reescanear
+            # igual que después de publicar por la API (ADR 0008).
+            propagate_problem_change(result.problem_id)
         return self.render_to_response(context)
 
 
