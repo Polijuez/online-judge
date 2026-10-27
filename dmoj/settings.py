@@ -60,6 +60,9 @@ DMOJ_CAMO_EXCLUDE = ()
 DMOJ_PROBLEM_DATA_ROOT = None
 DMOJ_PROBLEM_MEDIA_ROOT = None
 
+# Maximum size of a problem data file (zip, init.yml, checker, ...). None disables the check.
+DMOJ_PROBLEM_MAX_FILE_SIZE = None
+
 DMOJ_PROBLEM_MIN_TIME_LIMIT = 0  # seconds
 DMOJ_PROBLEM_MAX_TIME_LIMIT = 60  # seconds
 DMOJ_PROBLEM_MIN_MEMORY_LIMIT = 0  # kilobytes

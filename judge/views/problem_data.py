@@ -18,7 +18,7 @@ from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext as _
 from django.views.generic import DetailView
-from django.db import transaction, models
+from django.db import transaction
 
 from judge.highlight_code import highlight_code
 from judge.models import Problem, ProblemData, ProblemTestCase, ProblemMedia, Submission,  \
@@ -46,28 +46,38 @@ def _read_yml(upload) -> dict | str:
         upload.seek(0)
     return parsed
 
-def check_file_basic(file, ext=None):
+def _format_file_size(size):
+    if size < 1024:
+        return f"{size}B"
+    if size < 1024 * 1024:
+        return f"{size // 1024}KB"
+    return f"{size // 1024 // 1024}MB"
+
+def _check_file_size(file, max_size):
+    if max_size is not None and file.size > max_size:
+        raise ValidationError(_("%s is too big (max %s)") % (file.name, _format_file_size(max_size)))
+
+def check_problem_file(file, ext=None):
+    """Validate a problem data file: its extension and, when configured, its size."""
     if ext and not file.name.endswith(ext):
         if isinstance(ext, str):
-            raise ValidationError(_("%s must be a %s file") % (file.name,ext))
+            raise ValidationError(_("%s must be a %s file") % (file.name, ext))
         else:
             raise ValidationError(_("%s format is not accepted") % file.name)
-    if hasattr(settings, "DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE"):
-        if file.size > settings.DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE:
-            size = settings.DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE
-            if size<1024:
-                size_words = f"{size}B"
-            elif size<1024*1024:
-                size_words = f"{size//1024}KB"
-            else:
-                size_words = f"{size//1024//1024}MB"
-            raise ValidationError(_("%s is too big (max %s)") % (file.name,size_words))
-    else:
+    _check_file_size(file, getattr(settings, 'DMOJ_PROBLEM_MAX_FILE_SIZE', None))
+
+def check_media_file(file):
+    """Validate a media file against the media limits, which are opt-in."""
+    allowed_formats = getattr(settings, 'DMOJ_PROBLEM_MEDIA_ALLOWED_FORMATS', None)
+    max_file_size = getattr(settings, 'DMOJ_PROBLEM_MEDIA_MAX_FILE_SIZE', None)
+    if not allowed_formats or max_file_size is None:
         raise ValidationError(_("Problem media is not allowed"))
 
-def debug(message):
-    with open("/tmp/debug","a") as f:
-        print(message, file=f)
+    if isinstance(allowed_formats, str):
+        allowed_formats = (allowed_formats,)
+    if not file.name.endswith(tuple(allowed_formats)):
+        raise ValidationError(_("%s format is not accepted") % file.name)
+    _check_file_size(file, max_file_size)
 
 def _get_valid_name(data, filename):
     return problem_directory_file(data, problem_data_storage.get_valid_name(filename))
@@ -81,8 +91,6 @@ def check_file_duplicate(data, upload:list[str], stored:list[str]):
             filenames.append(upd)
         elif in_store:
             filenames.append(in_store)
-
-    debug(f"{upload} {stored} {filenames}")
 
     unique = set()
     for file in filenames:
@@ -107,8 +115,7 @@ class ProblemDataForm(ModelForm):
         if not initfile:
             return initfile
 
-        debug(f"{initfile}")
-        check_file_basic(initfile,('.yml','.yaml'))
+        check_problem_file(initfile, ('.yml', '.yaml'))
         ## Inspeccionar contenido de forma segura
         self.inityml = _read_yml(initfile)
         if not isinstance(self.inityml,dict):
@@ -120,32 +127,32 @@ class ProblemDataForm(ModelForm):
         checker = self.cleaned_data['checker']
         if not checker:
             return checker
-        check_file_basic(checker,".py")
+        check_problem_file(checker, ".py")
         return checker
 
     def clean_grader(self):
         grader = self.cleaned_data['grader']
         if not grader:
             return grader
-        check_file_basic(grader,".py")
+        check_problem_file(grader, ".py")
         return grader
 
     def clean_signature(self):
         signature = self.cleaned_data['signature']
         if not signature:
             return signature
-        check_file_basic(signature,".hpp")
+        check_problem_file(signature, ".hpp")
         return signature
 
     def clean_evaluator(self):
         evaluator = self.cleaned_data['evaluator']
         if not evaluator:
             return evaluator
-        check_file_basic(evaluator,".cpp")
+        check_problem_file(evaluator, ".cpp")
         return evaluator
 
     def clean(self):
-        if hasattr(self, 'inityml'):
+        if isinstance(getattr(self, 'inityml', None), dict):
             valid_files = True  # defaults to all files
             if hasattr(self, 'valid_files'):
                 valid_files = self.valid_files
@@ -166,8 +173,6 @@ class ProblemDataForm(ModelForm):
         elif not signature or not evaluator:
             raise ValidationError(_("Signature and evaluator are required"))
 
-        # files = [f for f in ProblemDataForm.Meta.fields if isinstance(getattr(ProblemData,f),models.fields.files.FileDescriptor)]
-        # debug(f"{files} {[getattr(ProblemData,f) for f in ProblemDataForm.Meta.fields]}")
         file_fields = ProblemData.get_file_fields()
         file_originals = ProblemData.get_file_originals()
         upload = []
@@ -409,11 +414,8 @@ class ProblemMediaUploadForm(Form):
         if not upload:
             return upload
 
-        if hasattr(settings, "DMOJ_PROBLEM_MEDIA_ALLOWED_FORMATS"):
-            check_file_basic(upload, settings.DMOJ_PROBLEM_MEDIA_ALLOWED_FORMATS)
-        else:
-            raise ValidationError(_("Problem media is not allowed"))
-        
+        check_media_file(upload)
+
         if hasattr(self,'problem'):
             media_files = ProblemMedia.objects.filter(dataset=self.problem)
             if hasattr(settings, "DMOJ_PROBLEM_MEDIA_MAX_FILES"):
