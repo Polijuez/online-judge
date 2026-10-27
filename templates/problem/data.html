@@ -1,38 +1,5 @@
 {% extends "base.html" %}
 
-{% block js_media %}
-    <script type="text/javascript">
-        $(function () {
-            var $signature_grading = $('#id_problem-data-signature_grading');
-            var $rows = $('#id_problem-data-signature, #id_problem-data-evaluator').closest('tr');
-            var $files = $rows.find('input[type=file]');
-            // Checkbox that ClearableFileInput renders when a file is already stored.
-            var $clears = $rows.find('input[id$=-clear_id]');
-
-            console.log("hola mundo")
-            $signature_grading.change(function () {
-                var enabled = $signature_grading.is(':checked');
-                $rows.toggle(enabled);
-                // Guardar los datos para recuperarlos con toggle
-                if (!enabled) {
-                    $inputs.each(function () {
-                        var $el = $(this);
-                        $el.data('prev-val', $el.val());
-                    });
-                    $inputs.val('');
-                } else {
-                    $inputs.each(function () {
-                        var $el = $(this);
-                        $el.val($el.data('prev-val'))
-                    });
-                }
-                $clears.prop('checked', !enabled);
-            });
-            $rows.toggle($signature_grading.is(':checked'));
-        });
-    </script>
-{% endblock %}
-
 {% block media %}
     <style>
         .order-column {
@@ -54,54 +21,112 @@
             padding-bottom: 1em;
             background: #e99;
         }
+
+        .file-list {
+            margin: 0;
+            padding-left: 1.5em;
+        }
     </style>
 {% endblock %}
 
 {% block header %}
     <div class="title-line-action">
-        {% if data_form.instance.has_yml %}
+        [<a href="{{ url('problem_media', problem.code) }}">{{ _('View media') }}</a>]
+        {% if has_init %}
             [<a href="{{ url('problem_data_init', problem.code) }}">{{ _('View YAML') }}</a>]
         {% endif %}
     </div>
 {% endblock %}
 
 {% block body %}
-    {% if data_form.instance.feedback %}
-        <ul class="errorlist">
-            <li>{{ data_form.instance.feedback }}</li>
-        </ul>
-    {% endif %}
+    <h3>{{ _('Upload a problem package') }}</h3>
+    <p>{{ _('Publishing replaces the problem data and media with the contents of the package.') }}</p>
     <form action="" method="POST" enctype="multipart/form-data">
         {% csrf_token %}
-        <table class="table">{{ data_form.as_table() }}</table>
-        <table id="case-table" class="table">
-            <thead>
-            <tr>
-                <th class="order-column">{{ _('Order') }}</th>
-                <th class="type-column">{{ _('Type') }}</th>
-                <th>{{ _('Input file') }}</th>
-                <th>{{ _('Output file') }}</th>
-                <th>{{ _('Points') }}</th>
-            </tr>
-            </thead>
-            <tbody>
-            {% if all_cases %}
-                {% for case in all_cases %}
-                    <tr data-type="{{ case.type }}">
-                        <td>{{ case.order }}</td>
-                        <td class="type-column">{{ case.get_type_display() }}</td>
-                        <td>{{ case.input_file }}</td>
-                        <td>{{ case.output_file }}</td>
-                        <td>{% if case.points is not none %}{{ case.points }}{% endif %}</td>
-                    </tr>
-                {% endfor %}
-            {% else %}
-                <tr>
-                    <td colspan="5">{{ _('No test cases.') }}</td>
-                </tr>
-            {% endif %}
-            </tbody>
-        </table>
-        <input type="submit" value="{{ _('Submit!') }}" class="button">
+        <table class="table">{{ form.as_table() }}</table>
+        <input type="submit" value="{{ _('Publish') }}" class="button">
     </form>
+
+    {% if result %}
+        <h3>{{ _('Publish result') }}</h3>
+        <table class="table">
+            <tr>
+                <th>{{ _('Problem') }}</th>
+                <td><a href="{{ url('problem_detail', problem.code) }}">{{ problem.code }}</a></td>
+            </tr>
+            <tr>
+                <th>{{ _('Operation') }}</th>
+                <td>{% if result.created %}{{ _('created') }}{% else %}{{ _('replaced') }}{% endif %}</td>
+            </tr>
+            <tr>
+                <th>{{ _('Changed') }}</th>
+                <td>{{ _('yes') if result.changed else _('no') }}</td>
+            </tr>
+            <tr>
+                <th>{{ _('Files written') }}</th>
+                <td>
+                    <ul class="file-list">
+                        {% for name in result.files_written %}
+                            <li><code>{{ name }}</code></li>
+                        {% endfor %}
+                    </ul>
+                </td>
+            </tr>
+            <tr>
+                <th>{{ _('Cases') }}</th>
+                <td>{{ result.cases }}</td>
+            </tr>
+            <tr>
+                <th>{{ _('Aliases added') }}</th>
+                <td>
+                    {% for alias in result.aliases_added %}
+                        <code>{{ alias }}</code>{% if not loop.last %}, {% endif %}
+                    {% else %}
+                        {{ _('None') }}
+                    {% endfor %}
+                </td>
+            </tr>
+            <tr>
+                <th>{{ _('Warnings') }}</th>
+                <td>
+                    {% for warning in result.warnings %}
+                        {{ warning }}{% if not loop.last %}<br>{% endif %}
+                    {% else %}
+                        {{ _('None') }}
+                    {% endfor %}
+                </td>
+            </tr>
+        </table>
+        <p><a href="{{ url('problem_media', problem.code) }}">{{ _('View the published media files') }}</a></p>
+    {% endif %}
+
+    <h3>{{ _('Current cases') }}</h3>
+    <table id="case-table" class="table">
+        <thead>
+        <tr>
+            <th class="order-column">{{ _('Order') }}</th>
+            <th class="type-column">{{ _('Type') }}</th>
+            <th>{{ _('Input file') }}</th>
+            <th>{{ _('Output file') }}</th>
+            <th>{{ _('Points') }}</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if all_cases %}
+            {% for case in all_cases %}
+                <tr data-type="{{ case.type }}">
+                    <td>{{ case.order }}</td>
+                    <td class="type-column">{{ case.get_type_display() }}</td>
+                    <td>{{ case.input_file }}</td>
+                    <td>{{ case.output_file }}</td>
+                    <td>{% if case.points is not none %}{{ case.points }}{% endif %}</td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr>
+                <td colspan="5">{{ _('No test cases.') }}</td>
+            </tr>
+        {% endif %}
+        </tbody>
+    </table>
 {% endblock %}

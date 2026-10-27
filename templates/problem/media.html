@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block media %}
+    <style>
+        #media-table tbody td {
+            white-space: nowrap;
+        }
+
+        .size-column {
+            width: 8em;
+            text-align: right;
+        }
+    </style>
+{% endblock %}
+
+{% block header %}
+    <div class="title-line-action">
+        [<a href="{{ url('problem_data', problem.code) }}">{{ _('Go back') }}</a>]
+    </div>
+{% endblock %}
+
+{% block body %}
+    <p>{{ _('These files come from the published package and are served by the web server.') }}</p>
+    {% if media_files is none %}
+        <p>{{ _('Problem media is not configured for this site.') }}</p>
+    {% else %}
+        <table id="media-table" class="table">
+            <thead>
+            <tr>
+                <th>{{ _('File name') }}</th>
+                <th class="size-column">{{ _('Size') }}</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for file in media_files %}
+                <tr>
+                    <td><a href="{{ file.url }}" target="_blank">{{ file.name }}</a></td>
+                    <td class="size-column">{{ file.size }} B</td>
+                </tr>
+            {% else %}
+                <tr>
+                    <td colspan="2">{{ _('The published package has no media files.') }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+{% endblock %}

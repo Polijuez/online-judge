@@ -1,29 +1,23 @@
-import json
-import yaml
 import mimetypes
 import os
-from itertools import chain
-from typing import List
-from zipfile import BadZipfile, ZipFile
+from urllib.parse import quote, urljoin
 
+from django import forms
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import ValidationError
-from django.forms import BaseModelFormSet, HiddenInput, ModelForm, NumberInput, Select, formset_factory
-from django.http import Http404, HttpResponse, HttpResponseRedirect
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext as _
 from django.views.generic import DetailView
-from django.db import transaction
 
 from judge.highlight_code import highlight_code
-from judge.models import Problem, ProblemData, ProblemTestCase, Submission, problem_data_storage, \
-    problem_directory_file
-from judge.utils.problem_package import ProblemDataLoader
+from judge.models import Problem, ProblemTestCase, Submission, problem_data_storage
+from judge.utils.problem_package import PackageError, format_size, publish_package
 from judge.utils.unicode import utf8text
 from judge.utils.views import TitleMixin, add_file_response
 from judge.views.problem import ProblemMixin
@@ -31,164 +25,75 @@ from judge.views.problem import ProblemMixin
 mimetypes.init()
 mimetypes.add_type('application/x-yaml', '.yml')
 
-FIELD_CLEAR_MARKER = False ## value used in forms to clear a field
 
-def _read_yml(upload) -> dict | str:
-    try:
-        content = upload.read()
-        # Validar que sea YAML parseable
-        parsed = yaml.safe_load(content)
-        if not isinstance(parsed, dict):
-            return _("%s must be a YAML dictionary") % upload.name
-    except yaml.YAMLError as exc:
-        return _("invalid YAML: %s") % exc
-    finally:
-        # Rebobinar el puntero para que Django pueda guardarlo en disco
-        upload.seek(0)
-    return parsed
+class ProblemPackageForm(forms.Form):
+    """Subida del paquete completo: la única forma de escribir un problema."""
 
-def _format_file_size(size):
-    if size < 1024:
-        return f"{size}B"
-    if size < 1024 * 1024:
-        return f"{size // 1024}KB"
-    return f"{size // 1024 // 1024}MB"
+    package = forms.FileField(
+        label=_('problem package'),
+        help_text=_('Zip with problem.yml, init.yml, the case archive, statement.md and optional media/.'),
+    )
 
-def _check_file_size(file, max_size):
-    if max_size is not None and file.size > max_size:
-        raise ValidationError(_("%s is too big (max %s)") % (file.name, _format_file_size(max_size)))
-
-def check_problem_file(file, ext=None):
-    """Validate a problem data file: its extension and, when configured, its size."""
-    if ext and not file.name.endswith(ext):
-        if isinstance(ext, str):
-            raise ValidationError(_("%s must be a %s file") % (file.name, ext))
-        else:
-            raise ValidationError(_("%s format is not accepted") % file.name)
-    _check_file_size(file, getattr(settings, 'DMOJ_PROBLEM_MAX_FILE_SIZE', None))
-
-def _get_valid_name(data, filename):
-    return problem_directory_file(data, problem_data_storage.get_valid_name(filename))
-
-def check_file_duplicate(data, upload:list[str], stored:list[str]):
-    filenames = []
-    for upd,in_store in zip(upload,stored):
-        if upd is False:
-            continue
-        if upd:
-            filenames.append(upd)
-        elif in_store:
-            filenames.append(in_store)
-
-    unique = set()
-    for file in filenames:
-        if file in unique:
-            raise ValidationError(_("%s is duplicated!") % file)
-        unique.add(file)
-
-
-class ProblemDataForm(ModelForm):
-    def clean_zipfile(self):
-        if hasattr(self, 'zip_valid') and not self.zip_valid:
-            raise ValidationError(_('Your zip file is invalid!'))
-
-        zipfile = self.cleaned_data['zipfile']
-        if zipfile and not zipfile.name.endswith('.zip'):
-            raise ValidationError(_("Zip files must end in '.zip'"))
-
-        return zipfile
-
-    def clean_initfile(self):
-        initfile = self.cleaned_data['initfile']
-        if not initfile:
-            return initfile
-
-        check_problem_file(initfile, ('.yml', '.yaml'))
-        ## Inspeccionar contenido de forma segura
-        self.inityml = _read_yml(initfile)
-        if not isinstance(self.inityml,dict):
-            raise ValidationError(self.inityml)
-
-        return initfile
-
-    def clean_checker(self):
-        checker = self.cleaned_data['checker']
-        if not checker:
-            return checker
-        check_problem_file(checker, ".py")
-        return checker
-
-    def clean_grader(self):
-        grader = self.cleaned_data['grader']
-        if not grader:
-            return grader
-        check_problem_file(grader, ".py")
-        return grader
-
-    def clean_signature(self):
-        signature = self.cleaned_data['signature']
-        if not signature:
-            return signature
-        check_problem_file(signature, ".hpp")
-        return signature
-
-    def clean_evaluator(self):
-        evaluator = self.cleaned_data['evaluator']
-        if not evaluator:
-            return evaluator
-        check_problem_file(evaluator, ".cpp")
-        return evaluator
-
-    def clean(self):
-        if isinstance(getattr(self, 'inityml', None), dict):
-            valid_files = True  # defaults to all files
-            if hasattr(self, 'valid_files'):
-                valid_files = self.valid_files
-            loader = ProblemDataLoader(
-                self.instance.problem,
-                self.inityml,
-                valid_files,
-                dry_run=True
+    def clean_package(self):
+        package = self.cleaned_data['package']
+        if not package.name.lower().endswith('.zip'):
+            raise ValidationError(_("The package must be a .zip file"))
+        max_size = getattr(settings, 'DMOJ_PROBLEM_PACKAGE_MAX_SIZE', None)
+        if max_size is not None and package.size > max_size:
+            raise ValidationError(
+                _('The package is too big (max %s)') % format_size(max_size),
             )
-            loader.load()
+        return package
 
-        signature_grading = self.cleaned_data['signature_grading']
-        signature = self.cleaned_data.get('signature',None)
-        evaluator = self.cleaned_data.get('evaluator',None)
-        if not signature_grading:
-            self.cleaned_data['signature'] = FIELD_CLEAR_MARKER
-            self.cleaned_data['evaluator'] = FIELD_CLEAR_MARKER
-        elif not signature or not evaluator:
-            raise ValidationError(_("Signature and evaluator are required"))
 
-        file_fields = ProblemData.get_file_fields()
-        file_originals = ProblemData.get_file_originals()
-        upload = []
-        for file,original in zip(file_fields,file_originals):
-            if self.cleaned_data.get(file):
-                if getattr(self.instance,original)!=self.cleaned_data.get(file):
-                    upload.append(_get_valid_name(self.instance,self.cleaned_data.get(file).name))
-                else:
-                    upload.append(self.cleaned_data.get(file).name)
-            else:
-                upload.append(self.cleaned_data.get(file))
-        stored = [getattr(self.instance,file).name for file in file_fields]
-        check_file_duplicate(self.instance,upload,stored)
+def problem_media_url_base():
+    """URL pública de la raíz de medios de problemas, o ``None`` si no se puede deducir.
 
-        return self.cleaned_data
+    Los archivos los sirve el servidor web bajo ``MEDIA_URL``; la raíz de medios
+    de problemas es un subdirectorio de ``MEDIA_ROOT`` en todos los entornos.
+    """
+    media_root = getattr(settings, 'DMOJ_PROBLEM_MEDIA_ROOT', None)
+    root = getattr(settings, 'MEDIA_ROOT', None)
+    media_url = getattr(settings, 'MEDIA_URL', None)
+    if not media_root or not root or not media_url:
+        return None
+    try:
+        relative = os.path.relpath(media_root, root)
+    except ValueError:
+        return None
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return None
+    relative = relative.replace(os.sep, '/').strip('/')
+    if not media_url.endswith('/'):
+        media_url += '/'
+    return urljoin(media_url, relative + '/') if relative else media_url
 
-    class Meta:
-        model = ProblemData
-        fields = ['zipfile', 'initfile', 'checker', 'grader', 'signature_grading', 'signature', 'evaluator']
 
-class ProblemCaseForm(ModelForm):
-    class Meta:
-        model = ProblemTestCase
-        fields = ('order', 'type', 'input_file', 'output_file', 'points')
-        widgets = {
-            'type': Select(attrs={'style': 'width: 100%'}),
-            'points': NumberInput(attrs={'style': 'width: 4em'}),
-        }
+def list_problem_media(problem):
+    """Archivos de medios del problema, en orden, con su URL servida."""
+    media_root = getattr(settings, 'DMOJ_PROBLEM_MEDIA_ROOT', None)
+    base = problem_media_url_base()
+    if not media_root or not base:
+        return None
+
+    directory = os.path.join(media_root, problem.code)
+    if not os.path.isdir(directory):
+        return []
+
+    files = []
+    for dirpath, dirnames, filenames in os.walk(directory):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            path = os.path.join(dirpath, filename)
+            relative = os.path.relpath(path, directory).replace(os.sep, '/')
+            files.append({
+                'name': relative,
+                'size': os.path.getsize(path),
+                'url': base + quote('%s/%s' % (problem.code, relative)),
+            })
+    files.sort(key=lambda entry: entry['name'])
+    return files
+
 
 class ProblemManagerMixin(LoginRequiredMixin, ProblemMixin, DetailView):
     def get_object(self, queryset=None):
@@ -198,6 +103,7 @@ class ProblemManagerMixin(LoginRequiredMixin, ProblemMixin, DetailView):
         if self.request.user.is_superuser or problem.is_editable_by(self.request.user):
             return problem
         raise Http404()
+
 
 class ProblemSubmissionDiff(TitleMixin, ProblemMixin, DetailView):
     template_name = 'problem/submission-diff.html'
@@ -249,66 +155,54 @@ class ProblemDataView(TitleMixin, ProblemManagerMixin):
             format_html('<a href="{1}">{0}</a>', self.object.name,
                         reverse('problem_detail', args=[self.object.code]))))
 
-    def get_data_form(self, post=False):
-        return ProblemDataForm(data=self.request.POST if post else None, prefix='problem-data',
-                               files=self.request.FILES if post else None,
-                               instance=ProblemData.objects.get_or_create(problem=self.object)[0])
+    def get_has_init(self):
+        return problem_data_storage.exists(os.path.join(self.object.code, 'init.yml'))
 
     def get_all_cases(self):
         return ProblemTestCase.objects.filter(dataset_id=self.object.pk).order_by('order')
 
-    def get_valid_files(self, data, post=False) -> List[str]:
-        try:
-            if post and 'problem-data-zipfile-clear' in self.request.POST:
-                return []
-            elif post and 'problem-data-zipfile' in self.request.FILES:
-                return ZipFile(self.request.FILES['problem-data-zipfile']).namelist()
-            elif data.zipfile:
-                return ZipFile(data.zipfile.path).namelist()
-        except BadZipfile:
-            raise
-        return []
-
     def get_context_data(self, **kwargs):
         context = super(ProblemDataView, self).get_context_data(**kwargs)
-        if 'data_form' not in context:
-            context['data_form'] = self.get_data_form()
+        if 'form' not in context:
+            context['form'] = ProblemPackageForm()
         context['all_cases'] = self.get_all_cases()
+        context['has_init'] = self.get_has_init()
         return context
 
     def post(self, request, *args, **kwargs):
         self.object = problem = self.get_object()
-        data_form = self.get_data_form(post=True)
-        try:
-            valid_files = self.get_valid_files(data_form.instance, post=True)
-            data_form.zip_valid = True
-            data_form.valid_files = valid_files
-        except BadZipfile:
-            valid_files = []
-            data_form.zip_valid = False
+        form = ProblemPackageForm(request.POST, request.FILES)
+        result = None
+        if form.is_valid():
+            try:
+                # El servicio valida y escribe: el formulario no arma ni toca
+                # archivos por su cuenta.
+                result = publish_package(form.cleaned_data['package'], problem=problem,
+                                         author=request.user.profile)
+            except PackageError as error:
+                form.add_error('package', error)
+        context = self.get_context_data(form=form)
+        if result is not None:
+            context['result'] = result
+        return self.render_to_response(context)
 
-        if data_form.is_valid():
-            inityml = _read_yml(data_form.cleaned_data['initfile'])
-            cases = None
-            if isinstance(inityml,dict):
-                loader = ProblemDataLoader(
-                    problem,
-                    inityml,
-                    valid_files,
-                    dry_run=False
-                )
-                cases = loader.load()
-            with transaction.atomic():
-                data_form.save()
-                # Delete all previous cases
-                problem.cases.all().delete()
-                if cases:
-                    ProblemTestCase.objects.bulk_create(cases)
-            return HttpResponseRedirect(request.get_full_path())
-        
-        return self.render_to_response(self.get_context_data(data_form=data_form))
 
-    put = post
+class ProblemMediaView(TitleMixin, ProblemManagerMixin):
+    template_name = 'problem/media.html'
+
+    def get_title(self):
+        return _('Media for {0}').format(self.object.name)
+
+    def get_content_title(self):
+        return mark_safe(escape(_('Media for %s')) % (
+            format_html('<a href="{1}">{0}</a>', self.object.name,
+                        reverse('problem_detail', args=[self.object.code]))))
+
+    def get_context_data(self, **kwargs):
+        context = super(ProblemMediaView, self).get_context_data(**kwargs)
+        context['media_files'] = list_problem_media(self.object)
+        context['media_root'] = getattr(settings, 'DMOJ_PROBLEM_MEDIA_ROOT', None)
+        return context
 
 
 @login_required
@@ -335,6 +229,7 @@ def problem_data_file(request, problem, path):
 
     response['Content-Type'] = 'application/octet-stream'
     return response
+
 
 @login_required
 def problem_init_view(request, problem):

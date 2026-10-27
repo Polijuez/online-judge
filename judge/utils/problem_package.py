@@ -60,7 +60,7 @@ from judge.models import Language, LanguageLimit, Problem, ProblemAlias, Problem
 from judge.models.problem import PROBLEM_ID_REGEX
 from judge.models.problem_alias import ALIAS_MAX_LENGTH, ALIAS_RE, normalize_alias
 
-__all__ = ['PackageError', 'PublishResult', 'ProblemDataLoader', 'load_case_specs', 'publish_package']
+__all__ = ['PackageError', 'PublishResult', 'load_case_specs', 'publish_package']
 
 MANIFEST_NAME = 'problem.yml'
 INIT_NAME = 'init.yml'
@@ -670,22 +670,6 @@ def load_case_specs(inityml, valid_files):
                           'output_file': case['out'], 'points': case['points']})
             pos += 1
     return specs
-
-
-class ProblemDataLoader(object):
-    """Creador de casos a partir de ``init.yml`` (lo comparten el servicio y el staff)."""
-
-    def __init__(self, problem, inityml, valid_files, dry_run=False):
-        self.problem = problem
-        self.inityml = inityml
-        self.valid_files = valid_files
-        self.dry_run = dry_run
-
-    def load(self):
-        specs = load_case_specs(self.inityml, self.valid_files)
-        if self.dry_run:
-            return []
-        return [ProblemTestCase(dataset=self.problem, **spec) for spec in specs]
 
 
 # ---------------------------------------------------------------------------
