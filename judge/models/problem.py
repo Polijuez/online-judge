@@ -345,6 +345,11 @@ class Problem(models.Model):
     def get_absolute_url(self):
         return reverse('problem_detail', args=(self.code,))
 
+    def add_alias(self, name):
+        """Agrega un alias sin tocar los existentes; nunca se reemplazan."""
+        from judge.models.problem_alias import ProblemAlias
+        return ProblemAlias.create_for(self, name)
+
     @cached_property
     def author_ids(self):
         return Problem.authors.through.objects.filter(problem=self).values_list('profile_id', flat=True)

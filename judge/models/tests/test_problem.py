@@ -9,7 +9,7 @@ from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from judge.models import Comment, Language, LanguageLimit, Problem, Submission
+from judge.models import Comment, Language, LanguageLimit, Problem, ProblemAlias, Submission
 from judge.models.problem import PROBLEM_ID_REGEX, VotePermission, disallowed_characters_validator
 from judge.models.tests.util import CommonDataMixin, create_contest, create_contest_participation, \
     create_organization, create_problem, create_problem_type, create_solution, create_user
@@ -524,7 +524,7 @@ class ProblemUUIDMigrationTestCase(CommonDataMixin, TestCase):
         ]
 
     def test_assign_uuids_is_idempotent_and_reports_mapping(self):
-        migration = importlib.import_module('judge.migrations.0157_problem_uuid')
+        migration = importlib.import_module('judge.migrations.0158_problem_uuid')
 
         with tempfile.TemporaryDirectory() as tmp:
             report = os.path.join(tmp, 'mapping.txt')
@@ -538,14 +538,17 @@ class ProblemUUIDMigrationTestCase(CommonDataMixin, TestCase):
                 mapping = dict(line.split(' -> ') for line in lines)
                 self.assertCountEqual(mapping, {'camellos', 'pompeya'})
                 for old_code, new_code in mapping.items():
-                    self.assertRegex(new_code, PROBLEM_ID_REGEX)
-                    self.assertEqual(Problem.objects.get(pk=self._pk_for(old_code)).code, new_code)
+                    problem = Problem.objects.get(pk=self._pk_for(old_code))
+                    self.assertEqual(problem.code, new_code)
+                    self.assertCountEqual(problem.aliases.values_list('name', flat=True), [old_code])
 
                 first_report = lines
                 codes_after_first_run = dict(Problem.objects.values_list('pk', 'code'))
+                alias_count = ProblemAlias.objects.count()
                 migration.assign_uuids(apps, None)
 
                 self.assertEqual(dict(Problem.objects.values_list('pk', 'code')), codes_after_first_run)
+                self.assertEqual(ProblemAlias.objects.count(), alias_count)
                 with open(report, encoding='utf-8') as report_file:
                     self.assertEqual(report_file.read().splitlines(), first_report)
 

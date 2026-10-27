@@ -13,7 +13,8 @@ from django.db import transaction
 from django.db.models import BooleanField, Case, CharField, Count, F, FilteredRelation, Prefetch, Q, When
 from django.db.models.functions import Coalesce
 from django.db.utils import ProgrammingError
-from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseRedirect, JsonResponse
+from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponsePermanentRedirect, \
+    HttpResponseRedirect, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.template.loader import get_template
 from django.urls import reverse
@@ -28,9 +29,9 @@ from reversion import revisions
 
 from judge.comments import CommentedDetailView
 from judge.forms import ProblemCloneForm, ProblemPointsVoteForm, ProblemSubmitForm
-from judge.models import ContestSubmission, Judge, Language, Problem, ProblemGroup, ProblemPointsVote, \
-    ProblemTranslation, ProblemType, RuntimeVersion, Solution, Submission, SubmissionSource
-from judge.models.problem import generate_problem_code
+from judge.models import ContestSubmission, Judge, Language, Problem, ProblemAlias, ProblemGroup, \
+    ProblemPointsVote, ProblemTranslation, ProblemType, RuntimeVersion, Solution, Submission, SubmissionSource
+from judge.models.problem import PROBLEM_ID_REGEX, generate_problem_code
 from judge.utils.diggpaginator import DiggPaginator
 from judge.utils.opengraph import generate_opengraph
 from judge.utils.pdfoid import PDF_RENDERING_ENABLED, render_pdf
@@ -72,7 +73,29 @@ class ProblemMixin(object):
         return generic_message(self.request, _('No such problem'),
                                _('Could not find a problem with the code "%s".') % code, status=404)
 
+    def get_alias_redirect(self, request):
+        """`/problem/<alias>` redirige permanente a `/problem/<uuid>` conservando el resto del camino."""
+        code = self.kwargs.get(self.slug_url_kwarg, None)
+        if not code or re.match(PROBLEM_ID_REGEX, code):
+            return None
+        alias = ProblemAlias.resolve(code)
+        if alias is None:
+            return None
+
+        url = reverse('problem_detail', args=[alias.problem.code])
+        match = re.match(r'^/problem/%s(?=/|$)' % re.escape(code), request.path_info)
+        if match:
+            url = '/problem/%s%s' % (alias.problem.code, request.path_info[match.end():])
+        if request.META.get('SCRIPT_NAME'):
+            url = request.META['SCRIPT_NAME'] + url
+        if request.META.get('QUERY_STRING'):
+            url += '?' + request.META['QUERY_STRING']
+        return HttpResponsePermanentRedirect(url)
+
     def get(self, request, *args, **kwargs):
+        redirect = self.get_alias_redirect(request)
+        if redirect is not None:
+            return redirect
         try:
             return super(ProblemMixin, self).get(request, *args, **kwargs)
         except Http404:

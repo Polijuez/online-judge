@@ -11,8 +11,8 @@ from django.utils.html import format_html
 from django.utils.translation import gettext, gettext_lazy as _, ngettext
 from reversion.admin import VersionAdmin
 
-from judge.models import LanguageLimit, Problem, ProblemClarification, ProblemPointsVote, ProblemTranslation, Profile, \
-    Solution
+from judge.models import LanguageLimit, Problem, ProblemAlias, ProblemClarification, ProblemPointsVote, \
+    ProblemTranslation, Profile, Solution
 from judge.utils.views import NoBatchDeleteMixin
 from judge.widgets import AdminHeavySelect2MultipleWidget, AdminMartorWidget, AdminSelect2MultipleWidget, \
     AdminSelect2Widget, CheckboxSelectMultipleWithSelectAll
@@ -258,6 +258,22 @@ class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
         if form.cleaned_data.get('change_message'):
             return form.cleaned_data['change_message']
         return super(ProblemAdmin, self).construct_change_message(request, form, *args, **kwargs)
+
+
+class ProblemAliasAdmin(NoBatchDeleteMixin, admin.ModelAdmin):
+    list_display = ('name', 'linked_problem')
+    search_fields = ('name', 'problem__code', 'problem__name')
+    raw_id_fields = ('problem',)
+    ordering = ('name',)
+
+    def has_delete_permission(self, request, obj=None):
+        # Los alias no se borran: un nombre que alguna vez resolvió sigue resolviendo.
+        return False
+
+    @admin.display(description=_('problem'), ordering='problem__name')
+    def linked_problem(self, obj):
+        link = reverse('problem_detail', args=[obj.problem.code])
+        return format_html('<a href="{0}">{1}</a>', link, obj.problem.name)
 
 
 class ProblemPointsVoteAdmin(admin.ModelAdmin):
