@@ -48,56 +48,7 @@
     </form>
 
     {% if result %}
-        <h3>{{ _('Publish result') }}</h3>
-        <table class="table">
-            <tr>
-                <th>{{ _('Problem') }}</th>
-                <td><a href="{{ url('problem_detail', problem.code) }}">{{ problem.code }}</a></td>
-            </tr>
-            <tr>
-                <th>{{ _('Operation') }}</th>
-                <td>{% if result.created %}{{ _('created') }}{% else %}{{ _('replaced') }}{% endif %}</td>
-            </tr>
-            <tr>
-                <th>{{ _('Changed') }}</th>
-                <td>{{ _('yes') if result.changed else _('no') }}</td>
-            </tr>
-            <tr>
-                <th>{{ _('Files written') }}</th>
-                <td>
-                    <ul class="file-list">
-                        {% for name in result.files_written %}
-                            <li><code>{{ name }}</code></li>
-                        {% endfor %}
-                    </ul>
-                </td>
-            </tr>
-            <tr>
-                <th>{{ _('Cases') }}</th>
-                <td>{{ result.cases }}</td>
-            </tr>
-            <tr>
-                <th>{{ _('Aliases added') }}</th>
-                <td>
-                    {% for alias in result.aliases_added %}
-                        <code>{{ alias }}</code>{% if not loop.last %}, {% endif %}
-                    {% else %}
-                        {{ _('None') }}
-                    {% endfor %}
-                </td>
-            </tr>
-            <tr>
-                <th>{{ _('Warnings') }}</th>
-                <td>
-                    {% for warning in result.warnings %}
-                        {{ warning }}{% if not loop.last %}<br>{% endif %}
-                    {% else %}
-                        {{ _('None') }}
-                    {% endfor %}
-                </td>
-            </tr>
-        </table>
-        <p><a href="{{ url('problem_media', problem.code) }}">{{ _('View the published media files') }}</a></p>
+        {% include "problem/publish-result.html" %}
     {% endif %}
 
     <h3>{{ _('Current cases') }}</h3>

@@ -15,7 +15,7 @@ from judge.views import TitledTemplateView, api, blog, comment, contests, langua
     preview, problem, problem_manage, ranked_submission, register, stats, status, submission, tasks, ticket, \
     two_factor, user, widgets
 from judge.views.problem_data import ProblemDataView, ProblemMediaView, ProblemSubmissionDiff, \
-    problem_data_file, problem_init_view
+    ProblemUploadView, problem_data_file, problem_init_view
 from judge.views.register import ActivationView, RegistrationView
 from judge.views.select2 import AssigneeSelect2View, ClassSelect2View, CommentSelect2View, ContestSelect2View, \
     ContestUserSearchSelect2View, OrganizationSelect2View, ProblemSelect2View, TicketUserSelect2View, \
@@ -100,6 +100,7 @@ urlpatterns = [
     path('', include('social_django.urls')),
 
     path('problems/', problem.ProblemList.as_view(), name='problem_list'),
+    path('problems/upload/', ProblemUploadView.as_view(), name='problem_upload'),
     path('problems/random/', problem.RandomProblem.as_view(), name='problem_random'),
 
     path('problem/<str:problem>', include([
