@@ -60,16 +60,23 @@ def case_zip(files=None):
 
 
 def package(manifest=None, init=INIT_YML, statement='# Enunciado\n', cases=None, extra=None, media=None,
-            omit=(), archive_name='data.zip'):
-    """Arma un zip de paquete; ``omit`` saca archivos por nombre."""
+            omit=(), archive_name='data.zip', statement_name='statement.md'):
+    """Arma un zip de paquete; ``omit`` saca archivos por nombre.
+
+    ``statement_name`` elige el archivo de enunciado (md o pdf); con pdf,
+    ``statement`` son los bytes del archivo.
+    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w') as archive:
         if 'problem.yml' not in omit:
             archive.writestr('problem.yml', yaml_dump(manifest or yaml_manifest()))
         if 'init.yml' not in omit:
             archive.writestr('init.yml', init)
-        if 'statement.md' not in omit:
-            archive.writestr('statement.md', statement)
+        if statement_name not in omit:
+            if isinstance(statement, bytes):
+                archive.writestr(statement_name, statement)
+            else:
+                archive.writestr(statement_name, statement.encode('utf-8'))
         if archive_name not in omit:
             archive.writestr(archive_name, case_zip(cases))
         for name, content in (extra or {}).items():
@@ -124,6 +131,7 @@ class ProblemPackageTestCase(TestCase):
         self.assertRegex(problem.code, r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
         self.assertEqual(problem.name, 'Suma de dos')
         self.assertEqual(problem.description, '# Enunciado\n')
+        self.assertFalse(problem.is_full_markup)
         self.assertTrue(problem.is_public)
         self.assertEqual(problem.group.name, 'basico')
         self.assertEqual(set(problem.types.values_list('name', flat=True)), {'math'})
@@ -144,9 +152,10 @@ class ProblemPackageTestCase(TestCase):
             'init.yml': INIT_YML,
             'data.zip': expected_data_zip,
         })
-        self.assertEqual(tree(os.path.join(self.media_root, problem.code)), {'figura.png': b'png'})
+        self.assertEqual(tree(os.path.join(self.media_root, problem.code)),
+                         {'figura.png': b'png', 'statement.md': b'# Enunciado\n'})
         self.assertEqual(result.files_written, ('data.zip', 'init.yml'))
-        self.assertEqual(result.media_files, ('media/figura.png',))
+        self.assertEqual(result.media_files, ('media/figura.png', 'media/statement.md'))
         self.assertEqual(result.cases, 1)
         self.assertTrue(result.created)
 
@@ -191,6 +200,88 @@ class ProblemPackageTestCase(TestCase):
         self.assertEqual(Problem.objects.count(), 0)
         self.assertFalse(os.path.exists(self.data_root))
         self.assertFalse(os.path.exists(self.media_root))
+
+    def test_statement_file_also_lands_in_the_media_dir(self):
+        result = self.publish(package(media={'figura.png': b'png'}))
+        problem = Problem.objects.get(code=result.problem_id)
+
+        self.assertEqual(
+            tree(os.path.join(self.media_root, problem.code)),
+            {'figura.png': b'png', 'statement.md': b'# Enunciado\n'},
+        )
+        self.assertIn('media/statement.md', result.media_files)
+
+    def test_package_without_any_statement_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(omit=('statement.md',)))
+
+        self.assertIn('statement', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_package_with_both_statements_is_rejected(self):
+        buffer = io.BytesIO(package(statement=b'%PDF-1.4\n', statement_name='statement.pdf'))
+        with zipfile.ZipFile(buffer, 'a') as archive:
+            archive.writestr('statement.md', '# otro\n')
+        raw = buffer.getvalue()
+        with self.assertRaises(PackageError) as caught:
+            self.publish(raw)
+
+        self.assertIn('exactly one', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_pdf_statement_publishes_an_embed_and_marks_full_markup(self):
+        raw = package(statement=b'%PDF-1.4 fake\n', statement_name='statement.pdf')
+        result = self.publish(raw)
+        problem = Problem.objects.get(code=result.problem_id)
+
+        self.assertTrue(problem.is_full_markup)
+        self.assertEqual(
+            problem.description,
+            '<embed style="overflow: scroll; height: 75vh; width: 100%; pointer-events: auto;" '
+            'src="/media/problems/{}/statement.pdf">'.format(problem.code),
+        )
+        self.assertEqual(
+            tree(os.path.join(self.media_root, problem.code)),
+            {'statement.pdf': b'%PDF-1.4 fake\n'},
+        )
+
+    def test_replacing_a_pdf_statement_with_markdown_clears_full_markup(self):
+        first = self.publish(package(statement=b'%PDF-1.4\n', statement_name='statement.pdf'))
+        problem = Problem.objects.get(code=first.problem_id)
+        self.assertTrue(problem.is_full_markup)
+
+        self.publish(package(), problem=problem)
+        problem.refresh_from_db()
+        self.assertFalse(problem.is_full_markup)
+
+    def test_relative_statement_references_are_rewritten_to_the_problem_media_url(self):
+        statement = (
+            '# Enunciado\n\n'
+            'Leé [la plantilla](media/template.hs) y [el kit](kit.zip).\n\n'
+            '![dibujo](media/dibujo.png)\n\n'
+            'Absoluto [DMOJ](https://dmoj.ca) y [interno](/problems/) y [ancla](#seccion).\n'
+        )
+        result = self.publish(package(statement=statement, media={
+            'template.hs': b'f =', 'kit.zip': b'PK', 'dibujo.png': b'png',
+        }))
+        problem = Problem.objects.get(code=result.problem_id)
+
+        base = '/media/problems/%s/' % problem.code
+        self.assertEqual(
+            problem.description,
+            '# Enunciado\n\n'
+            'Leé [la plantilla](%stemplate.hs) y [el kit](%skit.zip).\n\n'
+            '![dibujo](%sdibujo.png)\n\n'
+            'Absoluto [DMOJ](https://dmoj.ca) y [interno](/problems/) y [ancla](#seccion).\n' % (
+                base, base, base,
+            ),
+        )
+        self.assertFalse(any('statement references' in warning for warning in result.warnings))
+
+    def test_statement_reference_missing_from_media_is_a_warning(self):
+        result = self.publish(package(statement='Leé [esto](template.hs)\n'))
+
+        self.assertTrue(any('template.hs' in warning for warning in result.warnings))
 
     def test_unknown_manifest_schema(self):
         with self.assertRaises(PackageError) as caught:

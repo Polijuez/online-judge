@@ -32,7 +32,8 @@ class ProblemPackageForm(forms.Form):
 
     package = forms.FileField(
         label=_('problem package'),
-        help_text=_('Zip with problem.yml, init.yml, the case archive, statement.md and optional media/.'),
+        help_text=_('Zip with problem.yml, init.yml, the case archive, exactly one of '
+                    'statement.md or statement.pdf, and optional media/.'),
     )
 
     def clean_package(self):

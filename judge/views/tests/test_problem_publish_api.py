@@ -126,7 +126,7 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertTrue(payload['created'])
         self.assertTrue(payload['changed'])
         self.assertEqual(payload['files_written'], ['data.zip', 'init.yml'])
-        self.assertEqual(payload['media_files'], ['media/figura.png'])
+        self.assertEqual(payload['media_files'], ['media/figura.png', 'media/statement.md'])
         self.assertEqual(payload['cases'], 1)
         self.assertEqual(payload['aliases_added'], ['suma-de-dos', 'suma'])
 

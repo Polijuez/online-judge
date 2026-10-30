@@ -6,7 +6,9 @@ Un paquete es un zip con las entradas en la raíz:
 * ``init.yml`` (obligatorio): lo que el juez consume; su clave ``archive:``
   nombra el zip de casos.
 * el zip de casos nombrado por ``init.yml`` (obligatorio).
-* ``statement.md`` (obligatorio): el enunciado en markdown.
+* ``statement.md`` o ``statement.pdf`` (exactamente uno): el enunciado. El
+  markdown se publica tal cual con sus referencias relativas reescritas a la
+  URL de medios del problema; el pdf se incrusta con ``<embed>``.
 * ``checker.py``, ``grader.py``, ``signature.hpp`` y ``evaluator.cpp``
   (opcionales). También se aceptan los nombres que ``init.yml`` declare en
   ``checker``, ``grader``, ``signature``, ``evaluator`` o ``custom_judge``.
@@ -48,6 +50,7 @@ import shutil
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from urllib.parse import quote, urljoin
 
 import yaml
 from django.conf import settings
@@ -60,11 +63,18 @@ from judge.models import Language, LanguageLimit, Problem, ProblemAlias, Problem
 from judge.models.problem import PROBLEM_ID_REGEX
 from judge.models.problem_alias import ALIAS_MAX_LENGTH, ALIAS_RE, normalize_alias
 
-__all__ = ['PackageError', 'PublishResult', 'load_case_specs', 'publish_package']
+__all__ = [
+    'PackageError', 'PublishResult', 'load_case_specs', 'publish_package',
+    'STATEMENT_MD_NAME', 'STATEMENT_PDF_NAME',
+]
 
 MANIFEST_NAME = 'problem.yml'
 INIT_NAME = 'init.yml'
-STATEMENT_NAME = 'statement.md'
+STATEMENT_MD_NAME = 'statement.md'
+STATEMENT_PDF_NAME = 'statement.pdf'
+# Compatibilidad con el nombre histórico del enunciado en markdown.
+STATEMENT_NAME = STATEMENT_MD_NAME
+STATEMENT_NAMES = (STATEMENT_MD_NAME, STATEMENT_PDF_NAME)
 MEDIA_PREFIX = 'media/'
 SUPPORTED_SCHEMA = 1
 
@@ -83,7 +93,12 @@ DEFAULT_MEMORY_LIMIT = 262144
 DEFAULT_POINTS = 100
 
 #: Formatos de medios aceptados cuando el despliegue no configura una lista.
-DEFAULT_MEDIA_FORMATS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.md')
+DEFAULT_MEDIA_FORMATS = (
+    # imágenes y documentos del enunciado
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.pdf', '.md',
+    # archivos que el enunciado ofrece para descargar: kits y plantillas
+    '.zip', '.hs', '.py', '.cpp', '.h', '.hpp', '.c', '.java', '.txt',
+)
 
 _EXTENSION_RE = re.compile(r'^[A-Za-z0-9_+-]{1,10}$')
 _SAFE_ENTRY_RE = re.compile(r'^[^/\\\x00]+$')
@@ -138,7 +153,12 @@ class _Package:
     init_yml: dict
     archive_name: str
     archive_bytes: bytes
-    statement: str
+    #: Nombre del archivo de enunciado que trae el paquete (md o pdf).
+    statement_name: str
+    #: Contenido crudo del archivo de enunciado, tal como vino en el zip.
+    statement_bytes: bytes
+    #: Texto del enunciado markdown decodificado (``None`` para pdf).
+    statement_text: str = None
     optional: dict = field(default_factory=dict)
     file_fields: dict = field(default_factory=dict)
     media: dict = field(default_factory=dict)
@@ -536,6 +556,116 @@ def _collect_media(entries):
         raise _package_error('too many media files (max %d)' % max_files, file=MEDIA_PREFIX)
     return media
 
+# ---------------------------------------------------------------------------
+# Enunciado -> description
+# ---------------------------------------------------------------------------
+
+# Esquemas que una referencia de enunciado nunca debe reescribirse.
+_EXTERNAL_URL_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*:')
+
+
+def _media_url_base():
+    """URL pública de la raíz de medios de problemas, o ``None``.
+
+    La deduce de ``MEDIA_URL`` y la posición de ``DMOJ_PROBLEM_MEDIA_ROOT``
+    dentro de ``MEDIA_ROOT``; es la misma regla que usa la vista de medios.
+    """
+    media_root = getattr(settings, 'DMOJ_PROBLEM_MEDIA_ROOT', None)
+    root = getattr(settings, 'MEDIA_ROOT', None)
+    media_url = getattr(settings, 'MEDIA_URL', None)
+    if not media_root or not root or not media_url:
+        return None
+    try:
+        relative = os.path.relpath(media_root, root)
+    except ValueError:
+        return None
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return None
+    relative = relative.replace(os.sep, '/').strip('/')
+    if not media_url.endswith('/'):
+        media_url += '/'
+    return urljoin(media_url, relative + '/') if relative else media_url
+
+
+def _resolve_statement_reference(url, media_names, base, warnings):
+    """Reescribe una referencia relativa del enunciado a la URL de medios.
+
+    ``http(s)://``, anclas y esquemas como ``mailto:`` quedan intactos, y las
+    rutas absolutas (que empiezan con ``/``) también: no son del enunciado.
+    Una referencia relativa se resuelve contra la raíz de medios del
+    problema; un ``media/`` inicial se quita, y un archivo que no está en el
+    paquete es un aviso: el enlace queda visible roto en el sitio y no
+    silencioso.
+    """
+    url = url.strip()
+    if not url or url.startswith('#') or url.startswith('/') or _EXTERNAL_URL_RE.match(url):
+        return url
+    relative = url[len(MEDIA_PREFIX):] if url.startswith(MEDIA_PREFIX) else url
+    relative = relative.lstrip('/')
+    target = base + quote(relative) if base is not None else '/' + relative
+    if media_names is not None and relative not in media_names:
+        warnings.append('statement references %r which is not in media/' % url)
+    return target
+
+
+def _derive_description_from_markdown(text, media_names, base, warnings):
+    """Convierte el markdown del enunciado en la ``description`` del problema.
+
+    Reescribe los destinos relativos de enlaces e imágenes a la URL pública de
+    medios del problema. No toca código, anclas ni URLs absolutas.
+    """
+    link_re = re.compile(r'(!?)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+
+    def replace(match):
+        marker, label, url = match.group(1), match.group(2), match.group(3)
+        resolved = _resolve_statement_reference(url, media_names, base, warnings)
+        return '%s[%s](%s)' % (marker, label, resolved)
+
+    return link_re.sub(replace, text)
+
+
+
+def derive_description(code, package, warnings=None):
+    """``description`` del problema ``code`` que surge de ``package``.
+
+    El enunciado markdown se publica con sus referencias relativas
+    reescritas a la URL pública de medios; el pdf queda como un "embed"
+    al archivo servido. ``warnings`` opcional acumula las referencias que no
+    se pudieron resolver contra los medios del paquete.
+    """
+    if package.statement_name == STATEMENT_PDF_NAME:
+        return _derive_description_from_pdf(_media_url_base_for(code))
+    if warnings is None:
+        warnings = []
+    media_names = set(package.media) | {package.statement_name}
+    return _derive_description_from_markdown(
+        package.statement_text, media_names, _media_url_base_for(code), warnings,
+    )
+
+
+def _media_url_base_for(code):
+    base = _media_url_base()
+    quoted = quote(code) + '/'
+    if base is None:
+        # Sin ``MEDIA_ROOT``/``MEDIA_URL`` no se puede deducir la URL pública;
+        # asumimos el layout estándar del despliegue.
+        return '/media/problems/' + quoted
+    return urljoin(base, quoted)
+
+
+def _derive_description_from_pdf(base):
+    """Enunciado pdf: un ``<embed>`` al pdf servido como medio del problema.
+
+    La description resultante es HTML crudo, así que el problema se marca con
+    ``is_full_markup`` para que DMOJ la publique sin filtrar.
+    """
+    if base is None:
+        base = '/'
+    return (
+        '<embed style="overflow: scroll; height: 75vh; width: 100%; pointer-events: auto;" '
+        'src="{}{}">'.format(base, STATEMENT_PDF_NAME)
+    )
+
 
 def _validate_case_archive(archive_name, archive_bytes, init_yml):
     names = _read_nested_archive(archive_name, archive_bytes)
@@ -577,8 +707,17 @@ def _load_package(source):
         raise _package_error('missing required file', file=MANIFEST_NAME)
     if INIT_NAME not in entries:
         raise _package_error('missing required file', file=INIT_NAME)
-    if STATEMENT_NAME not in entries:
-        raise _package_error('missing required file', file=STATEMENT_NAME)
+    statement_names = [name for name in STATEMENT_NAMES if name in entries]
+    if not statement_names:
+        raise _package_error(
+            'missing required file (exactly one of %s)' % ', '.join(STATEMENT_NAMES),
+            file=STATEMENT_MD_NAME,
+        )
+    if len(statement_names) > 1:
+        raise _package_error(
+            'package has %s; include exactly one of them' % ' and '.join(statement_names),
+            file=statement_names[1],
+        )
 
     manifest = _parse_manifest(entries[MANIFEST_NAME])
     init_yml = _parse_init(entries[INIT_NAME])
@@ -593,14 +732,20 @@ def _load_package(source):
         raise _package_error('archive named by init.yml is missing', file=archive_name)
 
     optional, file_fields = _validate_optional_files(entries, init_yml)
-    allowed = {MANIFEST_NAME, INIT_NAME, STATEMENT_NAME, archive_name}
+    allowed = {MANIFEST_NAME, INIT_NAME, archive_name}
+    allowed.update(STATEMENT_NAMES)
     allowed.update(optional)
     _validate_root_entries(entries, allowed)
 
-    try:
-        statement = entries[STATEMENT_NAME].decode('utf-8')
-    except UnicodeDecodeError as exc:
-        raise _package_error('statement is not valid UTF-8 (%s)' % exc, file=STATEMENT_NAME)
+    statement_name = statement_names[0]
+    statement_bytes = entries[statement_name]
+    if statement_name == STATEMENT_MD_NAME:
+        try:
+            statement_text = statement_bytes.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise _package_error('statement is not valid UTF-8 (%s)' % exc, file=statement_name)
+    else:
+        statement_text = None
 
     archive_bytes = entries[archive_name]
     _validate_case_archive(archive_name, archive_bytes, init_yml)
@@ -613,7 +758,9 @@ def _load_package(source):
         init_yml=init_yml,
         archive_name=archive_name,
         archive_bytes=archive_bytes,
-        statement=statement,
+        statement_name=statement_name,
+        statement_bytes=statement_bytes,
+        statement_text=statement_text,
         optional=optional,
         file_fields=file_fields,
         media=media,
@@ -790,7 +937,9 @@ def _manifest_matches(problem, package):
     manifest = package.manifest
     if problem.name != manifest.title:
         return False
-    if problem.description != package.statement:
+    if problem.is_full_markup != (package.statement_name == STATEMENT_PDF_NAME):
+        return False
+    if problem.description != derive_description(problem.code, package):
         return False
     if problem.is_public != manifest.is_public:
         return False
@@ -874,7 +1023,8 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
         problem.memory_limit = manifest.memory_limit if manifest.memory_limit is not None else DEFAULT_MEMORY_LIMIT
         problem.points = manifest.points if manifest.points is not None else DEFAULT_POINTS
         problem.is_public = manifest.is_public
-        problem.description = package.statement
+        problem.description = derive_description(problem.code, package, warnings)
+        problem.is_full_markup = package.statement_name == STATEMENT_PDF_NAME
         problem.save()
         problem.allowed_languages.set(Language.objects.all())
         if author is not None:
@@ -883,7 +1033,8 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
             problem.authors.add(author)
     else:
         problem.name = manifest.title
-        problem.description = package.statement
+        problem.description = derive_description(problem.code, package, warnings)
+        problem.is_full_markup = package.statement_name == STATEMENT_PDF_NAME
         problem.group = group
         problem.is_public = manifest.is_public
         if manifest.time_limit is not None:
@@ -1034,7 +1185,11 @@ def publish_package(source, problem=None, author=None, user=None):
         os.makedirs(media_root, exist_ok=True)
 
         _write_tree(data_stage, package.data_files())
-        _write_tree(media_stage, package.media)
+        # El enunciado también es un medio: vive con el resto de los archivos
+        # del problema, en ``<raíz de medios>/<uuid>/statement.{md,pdf}``.
+        staged_media = dict(package.media)
+        staged_media[package.statement_name] = package.statement_bytes
+        _write_tree(media_stage, staged_media)
 
         needs_data_swap = not _tree_matches(data_live, data_stage)
         needs_media_swap = not _tree_matches(media_live, media_stage)
@@ -1074,7 +1229,8 @@ def publish_package(source, problem=None, author=None, user=None):
         shutil.rmtree(backup, ignore_errors=True)
 
     files_written = tuple(sorted(package.data_files()))
-    media_files = tuple(sorted(MEDIA_PREFIX + name for name in package.media))
+    media_files = tuple(sorted(MEDIA_PREFIX + name for name in
+                               dict(package.media, **{package.statement_name: package.statement_bytes})))
     return PublishResult(
         problem_id=problem.code,
         files_written=files_written,

@@ -16,3 +16,5 @@ resources/style.css
 resources/vars.scss
 sass_processed
 .DS_Store
+dmoj/local_settings.py
+.test-tmp/
