@@ -91,7 +91,6 @@ class ProblemUploadViewTestCase(TestCase):
             list(problem.cases.values_list('order', 'input_file', 'output_file')),
             [(1, '1.in', '1.out')],
         )
-        self.assertEqual(sorted(problem.aliases.values_list('name', flat=True)), ['suma', 'suma-de-dos'])
         self.assertEqual(problem.data_files.initfile, '%s/init.yml' % problem.code)
         self.assertTrue(problem.authors.filter(id=self.user.profile.id).exists())
 

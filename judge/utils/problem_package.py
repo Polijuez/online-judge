@@ -15,13 +15,12 @@ Un paquete es un zip con las entradas en la raíz:
 * ``media/...`` (opcional): archivos del enunciado.
 
 El manifiesto tiene esta forma (``schema``, ``title``, ``group`` y
-``visibility`` son obligatorias; ``aliases``, ``limits`` y ``types`` pueden
+``visibility`` son obligatorias; ``limits`` y ``types`` pueden
 omitirse y quedan vacías; las claves marcadas como opcionales solo pisan el
 valor del problema cuando están)::
 
     schema: 1
     title: "Nombre del problema"
-    aliases: [nombre-legible, otro-alias]
     limits:
       .cpp:
         tl: 1.0          # segundos
@@ -58,10 +57,8 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils.translation import gettext as _
 
-from judge.models import Language, LanguageLimit, Problem, ProblemAlias, ProblemData, ProblemGroup, ProblemTestCase, \
-    ProblemType
+from judge.models import Language, LanguageLimit, Problem, ProblemData, ProblemGroup, ProblemTestCase, ProblemType
 from judge.models.problem import PROBLEM_ID_REGEX
-from judge.models.problem_alias import ALIAS_MAX_LENGTH, ALIAS_RE, normalize_alias
 
 __all__ = [
     'PackageError', 'PublishResult', 'load_case_specs', 'publish_package',
@@ -82,7 +79,7 @@ SUPPORTED_SCHEMA = 1
 INIT_FILE_KEYS = ('checker', 'grader', 'signature', 'evaluator', 'custom_judge')
 
 MANIFEST_KEYS = frozenset({
-    'schema', 'title', 'aliases', 'limits', 'types', 'group', 'visibility',
+    'schema', 'title', 'limits', 'types', 'group', 'visibility',
     'time_limit', 'memory_limit', 'points',
 })
 LIMIT_KEYS = frozenset({'tl', 'ml'})
@@ -127,7 +124,6 @@ class PublishResult:
     files_written: tuple
     media_files: tuple
     cases: int
-    aliases_added: tuple
     warnings: tuple
     created: bool
     changed: bool
@@ -136,7 +132,6 @@ class PublishResult:
 @dataclass
 class _Manifest:
     title: str
-    aliases: tuple
     limits: dict
     types: tuple
     group: str
@@ -309,7 +304,6 @@ def _parse_manifest(raw):
     if len(title) > Problem._meta.get_field('name').max_length:
         raise _package_error('title is too long', file=MANIFEST_NAME)
 
-    aliases = _parse_aliases(data.get('aliases'))
     limits = _parse_limits(data.get('limits'))
     types = _parse_names(data.get('types'), 'types')
     group = data.get('group')
@@ -340,7 +334,7 @@ def _parse_manifest(raw):
         points = float(points)
 
     return _Manifest(
-        title=title, aliases=aliases, limits=limits, types=types, group=group,
+        title=title, limits=limits, types=types, group=group,
         is_public=VISIBILITIES[visibility], time_limit=time_limit,
         memory_limit=memory_limit, points=points,
     )
@@ -370,25 +364,6 @@ def _parse_memory_limit(value, label):
     if value > maximum:
         raise _package_error('%s is over the %sKB limit' % (label, maximum), file=MANIFEST_NAME)
     return value
-
-
-def _parse_aliases(value):
-    if value is None:
-        return ()
-    if not isinstance(value, list) or not all(isinstance(alias, str) for alias in value):
-        raise _package_error('aliases must be a list of strings', file=MANIFEST_NAME)
-    aliases = []
-    seen = set()
-    for alias in value:
-        alias = normalize_alias(alias.strip())
-        if not alias:
-            raise _package_error('alias must not be empty', file=MANIFEST_NAME)
-        if len(alias) > ALIAS_MAX_LENGTH or not ALIAS_RE.match(alias):
-            raise _package_error('invalid alias %r' % alias, file=MANIFEST_NAME)
-        if alias not in seen:
-            aliases.append(alias)
-            seen.add(alias)
-    return tuple(aliases)
 
 
 def _parse_names(value, key):
@@ -1094,29 +1069,6 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
     ProblemData.objects.filter(pk=data.pk).update(**fields)
 
 
-def _add_aliases(problem, manifest, added):
-    existing = set(problem.aliases.values_list('name', flat=True))
-    for alias in manifest.aliases:
-        if alias in existing:
-            continue
-        problem.add_alias(alias)
-        existing.add(alias)
-        added.append(alias)
-
-
-def _check_alias_conflicts(manifest, problem):
-    if not manifest.aliases:
-        return
-    conflicts = ProblemAlias.objects.filter(name__in=manifest.aliases)
-    if problem is not None and problem.pk is not None:
-        conflicts = conflicts.exclude(problem_id=problem.pk)
-    conflict = conflicts.first()
-    if conflict is not None:
-        raise _package_error(
-            'alias %r is already in use by another problem' % conflict.name, file=MANIFEST_NAME,
-        )
-
-
 def _check_public_visibility(manifest, user):
     """Exige el permiso de visibilidad del admin para publicar como público.
 
@@ -1152,7 +1104,6 @@ def publish_package(source, problem=None, author=None, user=None):
     manifest = package.manifest
 
     _check_public_visibility(manifest, user)
-    _check_alias_conflicts(manifest, problem)
 
     specs = load_case_specs(package.init_yml, _read_nested_archive(
         package.archive_name, package.archive_bytes,
@@ -1195,15 +1146,11 @@ def publish_package(source, problem=None, author=None, user=None):
         needs_media_swap = not _tree_matches(media_live, media_stage)
 
         changed = created or needs_data_swap or needs_media_swap or not _manifest_matches(problem, package) \
-            or not _limits_match(problem, manifest) or not _cases_match(problem, specs) \
-            or bool(set(manifest.aliases) - set(problem.aliases.values_list('name', flat=True)))
+            or not _limits_match(problem, manifest) or not _cases_match(problem, specs)
 
         try:
             with transaction.atomic():
                 _apply_metadata(problem, package, specs, created, warnings, author=author)
-
-                aliases_added = []
-                _add_aliases(problem, manifest, aliases_added)
 
                 if needs_data_swap:
                     _swap_tree(data_stage, data_live, data_backup)
@@ -1236,7 +1183,6 @@ def publish_package(source, problem=None, author=None, user=None):
         files_written=files_written,
         media_files=media_files,
         cases=len(specs),
-        aliases_added=tuple(aliases_added),
         warnings=tuple(warnings),
         created=created,
         changed=changed,

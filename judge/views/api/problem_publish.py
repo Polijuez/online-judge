@@ -118,7 +118,6 @@ def publish_response(result, status):
         'files_written': list(result.files_written),
         'media_files': list(result.media_files),
         'cases': result.cases,
-        'aliases_added': list(result.aliases_added),
         'warnings': list(result.warnings),
     }
     response = JsonResponse(payload, status=status)

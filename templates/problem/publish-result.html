@@ -28,16 +28,6 @@
         <td>{{ result.cases }}</td>
     </tr>
     <tr>
-        <th>{{ _('Aliases added') }}</th>
-        <td>
-            {% for alias in result.aliases_added %}
-                <code>{{ alias }}</code>{% if not loop.last %}, {% endif %}
-            {% else %}
-                {{ _('None') }}
-            {% endfor %}
-        </td>
-    </tr>
-    <tr>
         <th>{{ _('Warnings') }}</th>
         <td>
             {% for warning in result.warnings %}

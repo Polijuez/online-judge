@@ -19,7 +19,6 @@ from judge.utils.tests.fake_judge import FakeJudgeControlServer, closed_port_end
 MANIFEST = {
     'schema': 1,
     'title': 'Suma de dos',
-    'aliases': ['suma-de-dos', 'suma'],
     'limits': {
         '.cpp': {'tl': 1.0, 'ml': 262144},
         '.py': {'tl': 2.5, 'ml': 131072},
@@ -128,7 +127,6 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(payload['files_written'], ['data.zip', 'init.yml'])
         self.assertEqual(payload['media_files'], ['media/figura.png', 'media/statement.md'])
         self.assertEqual(payload['cases'], 1)
-        self.assertEqual(payload['aliases_added'], ['suma-de-dos', 'suma'])
 
         # El problema queda calificable: metadata, límites y casos aplicados.
         self.assertEqual(problem.name, 'Suma de dos')
@@ -161,7 +159,7 @@ class ProblemPublishAPITestCase(TestCase):
         user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
         created = self.body(self.post_package(make_package(), token))
 
-        raw = make_package(manifest={'title': 'Suma de dos (v2)', 'aliases': ['suma-de-dos', 'suma-v2']})
+        raw = make_package(manifest={'title': 'Suma de dos (v2)'})
         response = self.put_package(created['problem_id'], raw, token)
 
         self.assertEqual(response.status_code, 200)
@@ -169,10 +167,8 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(payload['problem_id'], created['problem_id'])
         self.assertFalse(payload['created'])
         self.assertTrue(payload['changed'])
-        self.assertEqual(payload['aliases_added'], ['suma-v2'])
         problem = Problem.objects.get(code=created['problem_id'])
         self.assertEqual(problem.name, 'Suma de dos (v2)')
-        self.assertTrue(problem.aliases.filter(name='suma-v2').exists())
 
     def test_replace_is_idempotent(self):
         user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
@@ -186,7 +182,6 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertTrue(self.body(first)['changed'])
         self.assertFalse(self.body(second)['changed'])
-        self.assertEqual(self.body(second)['aliases_added'], [])
         self.assertEqual(Problem.objects.get(code=created['problem_id']).name, 'Suma de dos v2')
 
     def test_replace_of_a_missing_problem_is_404(self):
@@ -262,7 +257,6 @@ class ProblemPublishAPITestCase(TestCase):
         forbidden = self.put_package(problem.code, make_package(), outsider_token)
 
         self.assertEqual(forbidden.status_code, 403)
-        self.assertFalse(problem.aliases.exists())
 
         admin, admin_token = self.user_with_token('club-admin', ('edit_own_problem', 'change_public_visibility'))
         problem.organizations.first().admins.add(admin.profile)
@@ -295,7 +289,6 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(self.body(response)['error']['code'], 'forbidden')
         problem.refresh_from_db()
         self.assertEqual(problem.name, problem.code)
-        self.assertFalse(problem.aliases.exists())
         self.assertFalse(os.path.exists(self.data_root))
 
     def test_a_private_publish_needs_no_change_public_visibility(self):

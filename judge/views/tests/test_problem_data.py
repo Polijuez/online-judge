@@ -18,7 +18,6 @@ from judge.utils.tests.fake_judge import FakeJudgeControlServer
 MANIFEST = {
     'schema': 1,
     'title': 'Suma de dos',
-    'aliases': ['suma-de-dos', 'suma'],
     'limits': {
         '.cpp': {'tl': 1.0, 'ml': 262144},
         '.py': {'tl': 2.5, 'ml': 131072},
@@ -129,7 +128,6 @@ class ProblemDataViewTestCase(TestCase):
             'cases': list(problem.cases.order_by('order').values_list(
                 'order', 'type', 'input_file', 'output_file', 'points',
             )),
-            'aliases': sorted(problem.aliases.values_list('name', flat=True)),
             'data_files': {
                 field: os.path.basename(getattr(data, field).name) if data and getattr(data, field) else None
                 for field in ProblemData.get_file_fields()
@@ -149,15 +147,9 @@ class ProblemDataViewTestCase(TestCase):
         response = self.post_package(by_form, raw)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'Suma de dos')
-        self.assertContains(response, 'suma-de-dos')
         self.assertContains(response, 'data.zip')
         form_state = self.snapshot(by_form)
 
-        # El paquete es el mismo: se borra el problema para liberar los alias y
-        # se publica por la API sobre el problema gemelo.
-        by_form.delete()
-        shutil.rmtree(os.path.join(self.data_root, by_form.code), ignore_errors=True)
-        shutil.rmtree(os.path.join(self.media_root, by_form.code), ignore_errors=True)
         response = self.put_package(by_api, raw)
         self.assertEqual(response.status_code, 200)
 
@@ -189,7 +181,6 @@ class ProblemDataViewTestCase(TestCase):
         self.assertEqual(self.snapshot(problem), before)
         self.assertFalse(ProblemData.objects.filter(problem=problem).exists())
         self.assertEqual(problem.cases.count(), 0)
-        self.assertFalse(problem.aliases.exists())
         self.assertFalse(os.path.exists(os.path.join(self.data_root, problem.code)))
         self.assertFalse(os.path.exists(os.path.join(self.media_root, problem.code)))
 

@@ -27,7 +27,6 @@ INIT_BATCHED = (
 MANIFEST = {
     'schema': 1,
     'title': 'Suma de dos',
-    'aliases': ['suma-de-dos', 'suma'],
     'limits': {
         '.cpp': {'tl': 1.0, 'ml': 262144},
         '.py': {'tl': 2.5, 'ml': 131072},
@@ -135,8 +134,6 @@ class ProblemPackageTestCase(TestCase):
         self.assertTrue(problem.is_public)
         self.assertEqual(problem.group.name, 'basico')
         self.assertEqual(set(problem.types.values_list('name', flat=True)), {'math'})
-        self.assertCountEqual(result.aliases_added, ['suma-de-dos', 'suma'])
-        self.assertCountEqual(problem.aliases.values_list('name', flat=True), ['suma-de-dos', 'suma'])
 
         self.assertEqual(problem.cases.count(), 1)
         case = problem.cases.get()
@@ -315,11 +312,11 @@ class ProblemPackageTestCase(TestCase):
                          Language.objects.filter(extension__iexact='cpp').count()
                          + Language.objects.filter(extension__iexact='py').count())
 
-    def test_republish_replaces_files_and_media_but_never_removes_aliases(self):
+    def test_republish_replaces_files_and_media(self):
         first = self.publish(package(media={'viejo.png': b'old'}))
         problem = Problem.objects.get(code=first.problem_id)
 
-        changed_manifest = yaml_manifest({'title': 'Otro título', 'aliases': ['nuevo'], 'types': ['geometry']})
+        changed_manifest = yaml_manifest({'title': 'Otro título', 'types': ['geometry']})
         changed_init = b'archive: otro.zip\ntest_cases:\n- points: 50\n  in: 2.in\n  out: 2.out\n'
         second = self.publish(
             package(manifest=changed_manifest, init=changed_init,
@@ -333,8 +330,6 @@ class ProblemPackageTestCase(TestCase):
         self.assertEqual(problem.name, 'Otro título')
         self.assertEqual(set(problem.types.values_list('name', flat=True)), {'geometry'})
         self.assertEqual(problem.cases.get().input_file, '2.in')
-        self.assertEqual(set(problem.aliases.values_list('name', flat=True)), {'suma-de-dos', 'suma', 'nuevo'})
-        self.assertEqual(second.aliases_added, ('nuevo',))
 
         code_dir = os.path.join(self.data_root, problem.code)
         self.assertEqual(tree(code_dir)['init.yml'], changed_init)
@@ -361,13 +356,11 @@ class ProblemPackageTestCase(TestCase):
             'media_stat': {name: os.stat(os.path.join(media_dir, name)) for name in tree(media_dir)},
             'cases': list(ProblemTestCase.objects.filter(dataset=problem).order_by('order')
                           .values_list('id', 'order', 'type', 'input_file', 'output_file', 'points')),
-            'aliases': list(problem.aliases.order_by('name').values_list('id', 'name')),
         }
 
         second = self.publish(raw, problem=problem)
 
         self.assertFalse(second.changed)
-        self.assertEqual(second.aliases_added, ())
         self.assertEqual(tree(code_dir), before['data'])
         self.assertEqual(tree(media_dir), before['media'])
         for name, stat in before['data_stat'].items():
@@ -383,7 +376,6 @@ class ProblemPackageTestCase(TestCase):
                  .values_list('id', 'order', 'type', 'input_file', 'output_file', 'points')),
             before['cases'],
         )
-        self.assertEqual(list(problem.aliases.order_by('name').values_list('id', 'name')), before['aliases'])
 
     def test_failure_while_swapping_leaves_the_previous_package_intact(self):
         first_package = package(statement='viejo\n', media={'viejo.png': b'old'})

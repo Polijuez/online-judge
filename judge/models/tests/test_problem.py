@@ -1,15 +1,9 @@
-import importlib
-import os
-import tempfile
-from unittest import mock
-
-from django.apps import apps
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from judge.models import Comment, Language, LanguageLimit, Problem, ProblemAlias, Submission
+from judge.models import Comment, Language, LanguageLimit, Problem, Submission
 from judge.models.problem import PROBLEM_ID_REGEX, VotePermission, disallowed_characters_validator
 from judge.models.tests.util import CommonDataMixin, create_contest, create_contest_participation, \
     create_organization, create_problem, create_problem_type, create_solution, create_user
@@ -511,49 +505,3 @@ class ProblemIdTestCase(CommonDataMixin, TestCase):
         comment = Comment(author=self.users['normal'].profile, page='p:%s' % self.problem.code, body='hola')
         comment.full_clean()
         self.assertEqual(comment.page_title, self.problem.name)
-
-
-class ProblemUUIDMigrationTestCase(CommonDataMixin, TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        super().setUpTestData()
-
-        cls.old_problems = [
-            create_problem(code='camellos'),
-            create_problem(code='pompeya'),
-        ]
-
-    def test_assign_uuids_is_idempotent_and_reports_mapping(self):
-        migration = importlib.import_module('judge.migrations.0158_problem_uuid')
-
-        with tempfile.TemporaryDirectory() as tmp:
-            report = os.path.join(tmp, 'mapping.txt')
-            with mock.patch.dict(os.environ, {'DMOJ_PROBLEM_UUID_REPORT': report}):
-                migration.assign_uuids(apps, None)
-
-                with open(report, encoding='utf-8') as report_file:
-                    lines = report_file.read().splitlines()
-
-                self.assertEqual(len(lines), len(self.old_problems))
-                mapping = dict(line.split(' -> ') for line in lines)
-                self.assertCountEqual(mapping, {'camellos', 'pompeya'})
-                for old_code, new_code in mapping.items():
-                    problem = Problem.objects.get(pk=self._pk_for(old_code))
-                    self.assertEqual(problem.code, new_code)
-                    self.assertCountEqual(problem.aliases.values_list('name', flat=True), [old_code])
-
-                first_report = lines
-                codes_after_first_run = dict(Problem.objects.values_list('pk', 'code'))
-                alias_count = ProblemAlias.objects.count()
-                migration.assign_uuids(apps, None)
-
-                self.assertEqual(dict(Problem.objects.values_list('pk', 'code')), codes_after_first_run)
-                self.assertEqual(ProblemAlias.objects.count(), alias_count)
-                with open(report, encoding='utf-8') as report_file:
-                    self.assertEqual(report_file.read().splitlines(), first_report)
-
-        for problem in Problem.objects.filter(pk__in=[p.pk for p in self.old_problems]):
-            self.assertRegex(problem.code, PROBLEM_ID_REGEX)
-
-    def _pk_for(self, old_code):
-        return next(problem.pk for problem in self.old_problems if problem.code == old_code)
