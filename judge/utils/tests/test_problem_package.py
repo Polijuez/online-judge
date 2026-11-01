@@ -2,6 +2,7 @@ import io
 import os
 import shutil
 import tempfile
+import unittest
 import zipfile
 from unittest import mock
 
@@ -22,6 +23,15 @@ INIT_BATCHED = (
     b'- points: 100\n'
     b'  batched:\n'
     b'  - {in: 1.in, out: 1.out}\n'
+)
+
+#: Problema real de producción con ``checker: floats`` (montaje de sólo lectura).
+PRODUCTION_PROBLEM = '/mnt/nfs/progcomp/polijuez/problems/b0ec8dd6-cdcb-4da1-8473-1cfeed44d5b5'
+
+#: Todos los checkers incorporados del juez (``dmoj.checkers``).
+BUILTIN_CHECKERS = (
+    'bridged', 'easy', 'floats', 'floatsabs', 'floatsrel', 'identical',
+    'linecount', 'linematches', 'rstripped', 'sorted', 'standard', 'unordered',
 )
 
 MANIFEST = {
@@ -47,6 +57,15 @@ def yaml_manifest(overrides=None):
 def yaml_dump(data):
     import yaml
     return yaml.safe_dump(data).encode('utf-8')
+
+
+def init_yml(**extra):
+    """``init.yml`` mínimo con las claves extra del juez delante."""
+    lines = [b'archive: data.zip\n']
+    for key, value in extra.items():
+        lines.append(yaml_dump({key: value}))
+    lines.append(b'test_cases:\n- points: 100\n  in: 1.in\n  out: 1.out\n')
+    return b''.join(lines)
 
 
 def case_zip(files=None):
@@ -94,6 +113,60 @@ def tree(root):
             path = os.path.join(current, filename)
             result[os.path.relpath(path, root)] = open(path, 'rb').read()
     return result
+
+
+def production_file(name):
+    with open(os.path.join(PRODUCTION_PROBLEM, name), 'rb') as f:
+        return f.read()
+
+
+def production_snapshot():
+    """Nombre, tamaño y mtime de cada archivo del problema de producción."""
+    snapshot = {}
+    for current, _, filenames in os.walk(PRODUCTION_PROBLEM):
+        for filename in filenames:
+            path = os.path.join(current, filename)
+            stat = os.stat(path)
+            snapshot[os.path.relpath(path, PRODUCTION_PROBLEM)] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def package_from_directory(root):
+    """Arma el zip del paquete a partir del árbol de un problema publicado.
+
+    El árbol de un problema de producción guarda ``init.yml``, el zip de casos y
+    los archivos del juez, más artefactos que no son parte del paquete
+    (``generator.py``, ``solution.cpp``) y el enunciado en
+    ``enunciado/enunciado.md``. Se copia a memoria solo lo que el paquete
+    admite —``init.yml``, su ``archive`` y los archivos que ``init.yml``
+    nombre— y nunca se escribe en el directorio de origen.
+    """
+    import yaml
+
+    with open(os.path.join(root, 'init.yml'), 'rb') as f:
+        init_bytes = f.read()
+    init_data = yaml.safe_load(init_bytes) or {}
+
+    names = ['init.yml']
+    if isinstance(init_data.get('archive'), str):
+        names.append(init_data['archive'])
+    for key in problem_package.INIT_FILE_KEYS:
+        value = init_data.get(key)
+        name = value.get('name') if isinstance(value, dict) else value
+        if isinstance(name, str) and os.path.isfile(os.path.join(root, name)):
+            names.append(name)
+
+    statement = os.path.join(root, 'enunciado', 'enunciado.md')
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        for name in dict.fromkeys(names):
+            archive.write(os.path.join(root, name), name)
+        if os.path.isfile(statement):
+            archive.write(statement, 'statement.md')
+        archive.writestr('problem.yml', yaml_dump(yaml_manifest({
+            'title': 'Unión de círculos', 'types': ['geometry'],
+        })))
+    return buffer.getvalue()
 
 
 class ProblemPackageTestCase(TestCase):
@@ -534,6 +607,451 @@ class ProblemPackageTestCase(TestCase):
         self.assertTrue(data.signature_grading)
         self.assertTrue(data.signature.name.endswith('/signature.hpp'))
         self.assertTrue(data.evaluator.name.endswith('/evaluator.cpp'))
+
+    # -- checkers incorporados del juez ------------------------------------
+
+    def test_the_builtin_checker_set_is_the_one_the_judge_ships(self):
+        # Los 12 módulos de ``dmoj.checkers``; si el juez agrega uno, esta
+        # lista y ``BUILTIN_CHECKERS`` se mueven juntas.
+        self.assertEqual(problem_package.BUILTIN_CHECKERS, frozenset(BUILTIN_CHECKERS))
+
+    def test_every_builtin_checker_is_accepted_without_a_checker_file(self):
+        for name in BUILTIN_CHECKERS:
+            with self.subTest(checker=name):
+                result = self.publish(package(init=init_yml(checker=name)))
+
+                data = ProblemData.objects.get(problem__code=result.problem_id)
+                # El checker incorporado no es un archivo: el juez lo resuelve
+                # por nombre desde ``dmoj.checkers``.
+                self.assertFalse(data.checker)
+                self.assertFalse(data.signature_grading)
+                published = tree(os.path.join(self.data_root, result.problem_id))
+                self.assertEqual(sorted(published), ['data.zip', 'init.yml'])
+                self.assertEqual(published['init.yml'], init_yml(checker=name))
+
+    def test_unknown_builtin_checker_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init_yml(checker='flotantes')))
+
+        self.assertEqual(caught.exception.file, 'init.yml')
+        self.assertIn("unknown built-in checker 'flotantes'", caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_builtin_checker_cannot_be_combined_with_checker_py(self):
+        checker = b'def check(proc, output, point_value, **kwargs):\n    return True\n'
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init_yml(checker='floats'), extra={'checker.py': checker}))
+
+        self.assertEqual(caught.exception.file, 'checker.py')
+        self.assertIn('ambiguous checker', caught.exception.reason)
+        self.assertIn('floats', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_named_checker_file_is_still_required_and_extension_checked(self):
+        checker = b'def check(proc, output, point_value, **kwargs):\n    return True\n'
+
+        result = self.publish(package(init=init_yml(checker='mio.py'),
+                                      extra={'mio.py': checker}))
+        data = ProblemData.objects.get(problem__code=result.problem_id)
+        self.assertTrue(data.checker.name.endswith('/mio.py'))
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init_yml(checker='mio.rb')))
+        self.assertEqual(caught.exception.file, 'mio.rb')
+        self.assertIn('extension is not allowed for checker', caught.exception.reason)
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init_yml(checker='mio.py')))
+        self.assertEqual(caught.exception.file, 'mio.py')
+        self.assertIn('not present in the package', caught.exception.reason)
+
+    def test_a_builtin_declared_as_a_mapping_is_resolved_by_name(self):
+        # El juez acepta ``checker: {name: floats, args: {...}}``; el bloque
+        # sigue nombrando un incorporado, así que tampoco es un archivo.
+        init = init_yml(checker={'name': 'floats', 'args': {'error_margin': 1e-6}})
+
+        result = self.publish(package(init=init))
+
+        data = ProblemData.objects.get(problem__code=result.problem_id)
+        self.assertFalse(data.checker)
+        self.assertEqual(sorted(tree(os.path.join(self.data_root, result.problem_id))),
+                         ['data.zip', 'init.yml'])
+
+    def test_republishing_with_a_builtin_clears_a_previous_checker_file(self):
+        checker = b'def check(proc, output, point_value, **kwargs):\n    return True\n'
+        problem = Problem.objects.get(code=self.publish(package(
+            init=init_yml(checker='mio.py'), extra={'mio.py': checker},
+        )).problem_id)
+        self.assertTrue(ProblemData.objects.get(problem=problem).checker)
+
+        self.publish(package(init=init_yml(checker='floats')), problem=problem)
+
+        self.assertFalse(ProblemData.objects.get(problem=problem).checker)
+        self.assertEqual(sorted(tree(os.path.join(self.data_root, problem.code))),
+                         ['data.zip', 'init.yml'])
+
+    def test_two_files_for_one_field_are_rejected_as_ambiguous(self):
+        # ``signature``/``evaluator`` nombrados por ``init.yml`` y además el
+        # bloque ``signature_grader`` con otros nombres: el mismo campo de
+        # ``ProblemData`` no puede salir de dos archivos distintos.
+        init = init_yml(signature='firma.hpp', evaluator='evaluador.cpp',
+                        signature_grader={'entry': 'otro.cpp', 'header': 'otra.hpp'})
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init, extra={
+                'firma.hpp': b'int f();', 'evaluador.cpp': b'int main() { return 0; }',
+                'otro.cpp': b'int main() { return 0; }', 'otra.hpp': b'int f();',
+            }))
+
+        self.assertIn('ambiguous', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_the_canonical_file_alongside_another_name_for_the_same_field_is_ambiguous(self):
+        checker = b'def check(proc, output, point_value, **kwargs):\n    return True\n'
+        grader = b'def grade(proc, output, point_value, **kwargs):\n    return True\n'
+        cases = (
+            ('checker', init_yml(checker='mio.py'),
+             {'checker.py': checker, 'mio.py': checker}, 'mio.py'),
+            ('grader', init_yml(grader='mio.py'),
+             {'grader.py': grader, 'mio.py': grader}, 'mio.py'),
+            ('custom_judge against grader', init_yml(custom_judge='judge.py'),
+             {'grader.py': grader, 'judge.py': grader}, 'judge.py'),
+        )
+        for label, init, extra, file in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(PackageError) as caught:
+                    self.publish(package(init=init, extra=extra))
+
+                self.assertEqual(caught.exception.file, file)
+                self.assertIn('ambiguous', caught.exception.reason)
+                self.assertEqual(Problem.objects.count(), 0)
+                self.assertFalse(os.path.exists(self.data_root))
+
+    def test_the_same_canonical_file_is_not_ambiguous(self):
+        # ``signature_grader`` apuntando a los nombres canónicos es el mismo
+        # archivo para el mismo campo: publicarlo dos veces no es un conflicto.
+        init = init_yml(signature_grader={'entry': 'evaluator.cpp', 'header': 'signature.hpp'})
+
+        result = self.publish(package(init=init, extra={
+            'signature.hpp': b'int firma();',
+            'evaluator.cpp': b'int main() { return 0; }',
+        }))
+
+        data = ProblemData.objects.get(problem__code=result.problem_id)
+        self.assertTrue(data.signature_grading)
+        self.assertTrue(data.signature.name.endswith('/signature.hpp'))
+        self.assertTrue(data.evaluator.name.endswith('/evaluator.cpp'))
+
+    # -- signature_grader --------------------------------------------------
+
+    def test_signature_grader_wires_entry_to_the_evaluator_and_header_to_the_signature(self):
+        init = init_yml(signature_grader={'entry': 'grader.cpp', 'header': 'grader.hpp'})
+        result = self.publish(package(init=init, extra={
+            'grader.cpp': b'int main() { return 0; }',
+            'grader.hpp': b'int resolver(int);\n',
+        }))
+
+        data = ProblemData.objects.get(problem__code=result.problem_id)
+        self.assertTrue(data.signature_grading)
+        self.assertTrue(data.evaluator.name.endswith('/grader.cpp'))
+        self.assertTrue(data.signature.name.endswith('/grader.hpp'))
+        self.assertEqual(tree(os.path.join(self.data_root, result.problem_id)), {
+            'init.yml': init,
+            'data.zip': case_zip(),
+            'grader.cpp': b'int main() { return 0; }',
+            'grader.hpp': b'int resolver(int);\n',
+        })
+
+    def test_signature_grader_accepts_allow_main(self):
+        init = init_yml(signature_grader={'entry': 'grader.cpp', 'header': 'grader.hpp', 'allow_main': True})
+        result = self.publish(package(init=init, extra={
+            'grader.cpp': b'int main() { return 0; }',
+            'grader.hpp': b'int resolver(int);\n',
+        }))
+
+        self.assertTrue(ProblemData.objects.get(problem__code=result.problem_id).signature_grading)
+
+    def test_signature_grader_without_the_pair_is_rejected(self):
+        cases = {
+            'entry only': {'entry': 'grader.cpp'},
+            'header only': {'header': 'grader.hpp'},
+            'neither': {},
+        }
+        for label, block in cases.items():
+            with self.subTest(block=label):
+                with self.assertRaises(PackageError) as caught:
+                    self.publish(package(init=init_yml(signature_grader=block), extra={
+                        'grader.cpp': b'int main() { return 0; }',
+                        'grader.hpp': b'int resolver(int);\n',
+                    }))
+
+                self.assertEqual(caught.exception.file, 'init.yml')
+                self.assertIn('required', caught.exception.reason)
+                self.assertEqual(Problem.objects.count(), 0)
+                self.assertFalse(os.path.exists(self.data_root))
+
+    def test_signature_grader_rejects_missing_files_wrong_extensions_and_traversal(self):
+        cases = (
+            ('missing entry', {'entry': 'falta.cpp', 'header': 'grader.hpp'}, 'falta.cpp',
+             'not present in the package'),
+            ('missing header', {'entry': 'grader.cpp', 'header': 'falta.hpp'}, 'falta.hpp',
+             'not present in the package'),
+            ('entry extension', {'entry': 'grader.py', 'header': 'grader.hpp'}, 'grader.py',
+             'extension is not allowed for signature_grader.entry'),
+            ('header extension', {'entry': 'grader.cpp', 'header': 'grader.h'}, 'grader.h',
+             'extension is not allowed for signature_grader.header'),
+            ('entry traversal', {'entry': '../grader.cpp', 'header': 'grader.hpp'}, '../grader.cpp',
+             'invalid file reference in init.yml'),
+            ('header traversal', {'entry': 'grader.cpp', 'header': '../grader.hpp'}, '../grader.hpp',
+             'invalid file reference in init.yml'),
+            ('entry not a string', {'entry': ['grader.cpp'], 'header': 'grader.hpp'}, 'init.yml',
+             'signature_grader.entry is required'),
+            # ``init.yml`` viaja tal cual al juez, que resuelve el nombre crudo:
+            # aceptar el nombre recortado publicaría un problema que no califica.
+            ('entry padded', {'entry': ' grader.cpp', 'header': 'grader.hpp'}, ' grader.cpp',
+             'must not have surrounding whitespace'),
+            ('header padded', {'entry': 'grader.cpp', 'header': 'grader.hpp '}, 'grader.hpp ',
+             'must not have surrounding whitespace'),
+        )
+        for label, block, file, reason in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(PackageError) as caught:
+                    self.publish(package(init=init_yml(signature_grader=block), extra={
+                        'grader.cpp': b'int main() { return 0; }',
+                        'grader.hpp': b'int resolver(int);\n',
+                    }))
+
+                self.assertEqual(caught.exception.file, file)
+                self.assertIn(reason, caught.exception.reason)
+                self.assertEqual(Problem.objects.count(), 0)
+                self.assertFalse(os.path.exists(self.data_root))
+
+    def test_signature_grader_rejects_unknown_keys_and_a_non_bool_allow_main(self):
+        cases = (
+            ({'entry': 'grader.cpp', 'header': 'grader.hpp', 'allow_main': 'sí'},
+             'signature_grader.allow_main must be a boolean'),
+            ({'entry': 'grader.cpp', 'header': 'grader.hpp', 'main': True},
+             'unknown key(s) in signature_grader: main'),
+            ('grader.cpp', 'signature_grader must be a mapping with entry and header'),
+        )
+        for block, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaises(PackageError) as caught:
+                    self.publish(package(init=init_yml(signature_grader=block), extra={
+                        'grader.cpp': b'int main() { return 0; }',
+                        'grader.hpp': b'int resolver(int);\n',
+                    }))
+
+                self.assertEqual(caught.exception.file, 'init.yml')
+                self.assertIn(reason, caught.exception.reason)
+                self.assertEqual(Problem.objects.count(), 0)
+
+    def test_custom_judge_cannot_be_combined_with_signature_grader(self):
+        init = init_yml(custom_judge='judge.py',
+                        signature_grader={'entry': 'grader.cpp', 'header': 'grader.hpp'})
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(init=init, extra={
+                'judge.py': b'def check(proc, output, point_value, **kwargs):\n    return True\n',
+                'grader.cpp': b'int main() { return 0; }',
+                'grader.hpp': b'int resolver(int);\n',
+            }))
+
+        self.assertEqual(caught.exception.file, 'init.yml')
+        self.assertIn('custom_judge cannot be combined with signature_grader', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_the_custom_judge_conflict_is_declared_by_key_not_by_a_resolvable_name(self):
+        # El juez prefiere ``CustomGrader`` con solo ver la clave ``custom_judge``,
+        # aunque su valor no nombre nada: declararla junto al bloque deja el
+        # paquete sin un modo de calificar.
+        for value in (None, {}, [], ''):
+            with self.subTest(custom_judge=value):
+                init = init_yml(custom_judge=value,
+                                signature_grader={'entry': 'grader.cpp', 'header': 'grader.hpp'})
+
+                with self.assertRaises(PackageError) as caught:
+                    self.publish(package(init=init, extra={
+                        'grader.cpp': b'int main() { return 0; }',
+                        'grader.hpp': b'int resolver(int);\n',
+                    }))
+
+                self.assertEqual(caught.exception.file, 'init.yml')
+                self.assertIn('custom_judge cannot be combined with signature_grader',
+                              caught.exception.reason)
+                self.assertEqual(Problem.objects.count(), 0)
+
+    def test_republishing_without_signature_grader_clears_the_fields_and_the_files(self):
+        init = init_yml(signature_grader={'entry': 'grader.cpp', 'header': 'grader.hpp'})
+        first = self.publish(package(init=init, extra={
+            'grader.cpp': b'int main() { return 0; }',
+            'grader.hpp': b'int resolver(int);\n',
+        }))
+        problem = Problem.objects.get(code=first.problem_id)
+        self.assertTrue(ProblemData.objects.get(problem=problem).signature_grading)
+
+        self.publish(package(), problem=problem)
+
+        data = ProblemData.objects.get(problem=problem)
+        self.assertFalse(data.signature_grading)
+        self.assertFalse(data.signature)
+        self.assertFalse(data.evaluator)
+        self.assertFalse(data.checker)
+        self.assertEqual(tree(os.path.join(self.data_root, problem.code)), {
+            'init.yml': INIT_YML,
+            'data.zip': case_zip(),
+        })
+        self.assertIn('grader.cpp', first.files_written)
+
+    # -- visibilidad -------------------------------------------------------
+
+    def test_a_manifest_without_visibility_is_rejected(self):
+        manifest = yaml_manifest()
+        manifest.pop('visibility')
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=manifest))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('visibility is required', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_an_unknown_visibility_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'visibility': 'interno'})))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('visibility must be one of', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    # -- robustez del zip --------------------------------------------------
+
+    def test_a_root_entry_with_a_traversal_path_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(extra={'../checker.py': b'x'}))
+
+        self.assertEqual(caught.exception.file, '../checker.py')
+        self.assertIn('invalid path in package', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_duplicated_entry_is_rejected(self):
+        buffer = io.BytesIO(package())
+        with zipfile.ZipFile(buffer, 'a') as archive:
+            archive.writestr('init.yml', INIT_YML)
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(buffer.getvalue())
+
+        self.assertEqual(caught.exception.file, 'init.yml')
+        self.assertIn('duplicated entry', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_symlink_and_encrypted_entries_are_rejected(self):
+        cases = {
+            'symlink': (self.zip_with_attributes('link.py', symlink=True), 'link.py',
+                        'symlinks are not accepted'),
+            'encrypted': (self.zip_with_encrypted_flag('secret.py'), 'secret.py',
+                          'encrypted entries are not accepted'),
+        }
+        for label, (raw, file, reason) in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaises(PackageError) as caught:
+                    self.publish(raw)
+
+                self.assertEqual(caught.exception.file, file)
+                self.assertIn(reason, caught.exception.reason)
+                self.assertEqual(Problem.objects.count(), 0)
+                self.assertFalse(os.path.exists(self.data_root))
+
+    def test_the_symlink_and_encryption_checks_also_cover_the_case_archive(self):
+        symlinked = self.zip_with_attributes('1.in', symlink=True)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            with zipfile.ZipFile(io.BytesIO(package(omit=('data.zip',)))) as source:
+                for info in source.infolist():
+                    archive.writestr(info, source.read(info))
+            archive.writestr('data.zip', symlinked)
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(buffer.getvalue())
+
+        self.assertEqual(caught.exception.file, 'data.zip')
+        self.assertIn('symlinks are not accepted', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_the_file_size_limit_covers_the_package_entries(self):
+        with override_settings(DMOJ_PROBLEM_MAX_FILE_SIZE=400):
+            with self.assertRaises(PackageError) as caught:
+                self.publish(package(extra={'checker.py': b'x' * 500}))
+
+        self.assertEqual(caught.exception.file, 'checker.py')
+        self.assertIn('too big', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+
+    def test_a_file_outside_the_allowed_names_is_rejected(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(extra={'solucion.cpp': b'int main() {}'}))
+
+        self.assertEqual(caught.exception.file, 'solucion.cpp')
+        self.assertIn('not allowed at the package root', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    # -- paquete real de producción ---------------------------------------
+
+    @unittest.skipUnless(os.path.isdir(PRODUCTION_PROBLEM), 'production mount is not available')
+    def test_the_production_package_with_the_floats_builtin_is_accepted(self):
+        before = production_snapshot()
+        raw = package_from_directory(PRODUCTION_PROBLEM)
+
+        result = self.publish(raw)
+
+        problem = Problem.objects.get(code=result.problem_id)
+        data = ProblemData.objects.get(problem=problem)
+        # ``checker: floats`` es un incorporado: no hay archivo ni campo.
+        self.assertFalse(data.checker)
+        self.assertFalse(data.signature_grading)
+        self.assertFalse(data.signature)
+        self.assertFalse(data.evaluator)
+        # El ``init.yml`` viaja tal cual y los 37 subcasos se convierten en
+        # filas C más el cierre de cada batch.
+        code_dir = os.path.join(self.data_root, problem.code)
+        self.assertEqual(tree(code_dir)['init.yml'], production_file('init.yml'))
+        self.assertEqual(tree(code_dir)['venn.zip'], production_file('venn.zip'))
+        self.assertEqual(problem.cases.filter(type='C').count(), 37)
+        # El montaje de producción es de sólo lectura y no se tocó.
+        self.assertEqual(production_snapshot(), before)
+
+    # -- ayudas de los tests de robustez -----------------------------------
+
+    def zip_with_attributes(self, name, symlink=False):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            info = zipfile.ZipInfo(name)
+            if symlink:
+                info.external_attr = 0o120777 << 16
+            archive.writestr(info, b'contenido')
+        return buffer.getvalue()
+
+    def zip_with_encrypted_flag(self, name):
+        """Marca una entrada como cifrada sin cifrar de verdad los bytes."""
+        buffer = io.BytesIO(self.zip_with_attributes(name))
+        raw = bytearray(buffer.getvalue())
+        for signature, offset in ((b'PK\x03\x04', 6), (b'PK\x01\x02', 8)):
+            start = 0
+            while True:
+                index = raw.find(signature, start)
+                if index < 0:
+                    break
+                raw[index + offset] |= 0x1
+                start = index + 4
+        return bytes(raw)
 
     # -- rescore -----------------------------------------------------------
 

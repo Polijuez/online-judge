@@ -11,7 +11,17 @@ Un paquete es un zip con las entradas en la raíz:
   URL de medios del problema; el pdf se incrusta con ``<embed>``.
 * ``checker.py``, ``grader.py``, ``signature.hpp`` y ``evaluator.cpp``
   (opcionales). También se aceptan los nombres que ``init.yml`` declare en
-  ``checker``, ``grader``, ``signature``, ``evaluator`` o ``custom_judge``.
+  ``checker``, ``grader``, ``signature``, ``evaluator`` o ``custom_judge``, y
+  los dos archivos del bloque ``signature_grader: {entry, header}``.
+* ``checker:`` acepta además los nombres incorporados del juez (``floats``,
+  ``standard``, ...): no nombran un archivo del paquete ni se registran en
+  ``ProblemData.checker``. Un nombre al que le falta el punto nunca es un
+  archivo para el juez, así que uno desconocido se rechaza.
+* ``signature_grader: {entry, header}`` declara el par de calificación por
+  firma: ``entry`` (``.cpp``) queda en ``ProblemData.evaluator`` y ``header``
+  (``.hpp``) en ``ProblemData.signature``. El juez elige ``SignatureGrader``
+  solo cuando el bloque existe; ``signature.hpp`` + ``evaluator.cpp`` sin el
+  bloque se publican como siempre y el problema se califica standard.
 * ``media/...`` (opcional): archivos del enunciado.
 
 El manifiesto tiene esta forma (``schema``, ``title``, ``group`` y
@@ -77,6 +87,17 @@ SUPPORTED_SCHEMA = 1
 
 #: Claves de ``init.yml`` que pueden nombrar un archivo del juez.
 INIT_FILE_KEYS = ('checker', 'grader', 'signature', 'evaluator', 'custom_judge')
+
+#: Checkers incorporados del juez: ``checker:`` puede nombrarlos sin archivo.
+#: Un nombre sin punto nunca es un archivo para el juez (lo resuelve como
+#: atributo de ``dmoj.checkers``), así que uno que no esté acá es un error.
+BUILTIN_CHECKERS = frozenset({
+    'bridged', 'easy', 'floats', 'floatsabs', 'floatsrel', 'identical',
+    'linecount', 'linematches', 'rstripped', 'sorted', 'standard', 'unordered',
+})
+
+#: Claves aceptadas dentro del bloque ``signature_grader``.
+SIGNATURE_GRADER_KEYS = frozenset({'entry', 'header', 'allow_main'})
 
 MANIFEST_KEYS = frozenset({
     'schema', 'title', 'limits', 'types', 'group', 'visibility',
@@ -314,6 +335,13 @@ def _parse_manifest(raw):
         raise _package_error('group name is too long', file=MANIFEST_NAME)
 
     visibility = data.get('visibility')
+    if 'visibility' not in data:
+        # Sin valor por defecto: publicar es una decisión explícita del
+        # manifiesto y un paquete viejo no debe heredar visibilidad.
+        raise _package_error(
+            'visibility is required and must be one of: %s' % ', '.join(sorted(VISIBILITIES)),
+            file=MANIFEST_NAME,
+        )
     if not isinstance(visibility, str) or visibility not in VISIBILITIES:
         raise _package_error(
             'visibility must be one of: %s' % ', '.join(sorted(VISIBILITIES)), file=MANIFEST_NAME,
@@ -439,6 +467,10 @@ _INIT_FILE_FIELDS = {
     'evaluator': 'evaluator',
 }
 
+#: Archivo de ``signature_grader`` y campo de ``ProblemData`` que lo recibe.
+#: ``entry`` es lo que el juez compila y ``header`` lo que incluye en el envío.
+_SIGNATURE_GRADER_FIELDS = (('entry', 'evaluator'), ('header', 'signature'))
+
 #: Extensiones aceptadas por campo de ``ProblemData``.
 _FIELD_EXTENSIONS = {
     'checker': ('.py',),
@@ -455,27 +487,102 @@ _CANONICAL_FILES = {
 }
 
 
+def _validate_signature_grader(init_yml, entries):
+    """Valida ``signature_grader`` y devuelve ``{campo: archivo}``.
+
+    El juez elige ``SignatureGrader`` cuando el bloque existe y lee de ahí el
+    ``entry`` que compila y el ``header`` que incluye en el envío; sin uno de
+    los dos el paquete no puede calificar, así que el par es obligatorio.
+    """
+    value = init_yml['signature_grader']
+    if not isinstance(value, dict):
+        raise _package_error('signature_grader must be a mapping with entry and header', file=INIT_NAME)
+    unknown = sorted(set(value) - SIGNATURE_GRADER_KEYS)
+    if unknown:
+        raise _package_error(
+            'unknown key(s) in signature_grader: %s' % ', '.join(unknown), file=INIT_NAME,
+        )
+    if 'allow_main' in value and not isinstance(value['allow_main'], bool):
+        raise _package_error('signature_grader.allow_main must be a boolean', file=INIT_NAME)
+
+    files = {}
+    for key, problem_field in _SIGNATURE_GRADER_FIELDS:
+        reference = value.get(key)
+        if not isinstance(reference, str) or not reference.strip():
+            raise _package_error(
+                'signature_grader.%s is required and must be a file name' % key, file=INIT_NAME,
+            )
+        # El nombre se valida tal cual: ``init.yml`` viaja al juez sin tocar, así
+        # que un nombre con espacios alrededor no resuelve allá aunque acá
+        # parece válido.
+        if reference != reference.strip():
+            raise _package_error('file reference must not have surrounding whitespace', file=reference)
+        if not _SAFE_ENTRY_RE.match(reference):
+            raise _package_error('invalid file reference in init.yml', file=reference)
+        extension = os.path.splitext(reference)[1].lower()
+        if extension not in _FIELD_EXTENSIONS[problem_field]:
+            raise _package_error(
+                'file extension is not allowed for signature_grader.%s' % key, file=reference,
+            )
+        if reference not in entries:
+            raise _package_error(
+                'referenced by init.yml but not present in the package', file=reference,
+            )
+        files[problem_field] = reference
+    return files
+
+
 def _validate_optional_files(entries, init_yml):
     """Valida los archivos del juez y devuelve ``(archivos, campos)``.
 
     ``archivos`` mapea nombre a bytes y ``campos`` mapea el campo de
-    ``ProblemData`` al nombre que lo contiene.
+    ``ProblemData`` al nombre que lo contiene. Un checker incorporado no tiene
+    archivo ni campo: el juez lo resuelve por nombre.
     """
     files = {}
     fields = {}
 
+    def assign(problem_field, name):
+        previous = fields.get(problem_field)
+        if previous is not None and previous != name:
+            raise _package_error(
+                'ambiguous %s: %s and %s cannot both fill it' % (problem_field, previous, name), file=name,
+            )
+        fields[problem_field] = name
+        files[name] = entries[name]
+
+    # El juez elige el grader por presencia de la clave, no por su valor: con
+    # ``custom_judge:`` declarado (aunque no resuelva a un nombre) prefiere
+    # ``CustomGrader`` y nunca mira ``signature_grader``. Con los dos la
+    # calificación no tiene un modo único, así que se rechaza por la clave.
+    if 'signature_grader' in init_yml and 'custom_judge' in init_yml:
+        raise _package_error(
+            'ambiguous grader: custom_judge cannot be combined with signature_grader', file=INIT_NAME,
+        )
+
     for field, canonical in _CANONICAL_FILES.items():
         if canonical in entries:
-            files[canonical] = entries[canonical]
-            fields[field] = canonical
+            assign(field, canonical)
 
     for key in INIT_FILE_KEYS:
         reference = _init_file_reference(init_yml.get(key))
         if not reference:
             continue
+        field = _INIT_FILE_FIELDS[key]
+        # Un nombre sin punto lo resuelve el juez como checker incorporado
+        # (``dmoj.checkers``), nunca como archivo. Uno desconocido falla allá,
+        # así que acá también: publicarlo sería publicar un problema roto.
+        if key == 'checker' and '.' not in reference:
+            if reference not in BUILTIN_CHECKERS:
+                raise _package_error('unknown built-in checker %r' % reference, file=INIT_NAME)
+            if 'checker' in fields:
+                raise _package_error(
+                    'ambiguous checker: the built-in checker %r cannot be combined with the checker file %s'
+                    % (reference, fields['checker']), file=fields['checker'],
+                )
+            continue
         if not _SAFE_ENTRY_RE.match(reference):
             raise _package_error('invalid file reference in init.yml', file=reference)
-        field = _INIT_FILE_FIELDS[key]
         extension = os.path.splitext(reference)[1].lower()
         if extension not in _FIELD_EXTENSIONS[field]:
             raise _package_error(
@@ -485,8 +592,11 @@ def _validate_optional_files(entries, init_yml):
             raise _package_error(
                 'referenced by init.yml but not present in the package', file=reference,
             )
-        files[reference] = entries[reference]
-        fields[field] = reference
+        assign(field, reference)
+
+    if 'signature_grader' in init_yml:
+        for field, name in _validate_signature_grader(init_yml, entries).items():
+            assign(field, name)
 
     # La ruta vieja exigía el par: el juez no puede correr una firma sin su
     # evaluador, así que aceptarla sería publicar un problema que no califica.

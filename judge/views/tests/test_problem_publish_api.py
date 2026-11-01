@@ -36,9 +36,11 @@ def yaml_dump(data):
 
 
 def make_package(manifest=None, init=INIT_YML, statement='# Enunciado\n', cases=None, media=None, omit=(),
-                 extra=None):
+                 extra=None, omit_manifest=()):
     data = dict(MANIFEST)
     data.update(manifest or {})
+    for key in omit_manifest:
+        data.pop(key, None)
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w') as archive:
@@ -370,6 +372,95 @@ class ProblemPublishAPITestCase(TestCase):
         error = self.body(response)['error']
         self.assertEqual(error['file'], 'signature.hpp')
         self.assertIn('evaluator', error['reason'])
+        self.assertNothingWritten()
+
+    def test_a_builtin_checker_publishes_without_a_checker_file(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        init = b'archive: data.zip\nchecker: floats\ntest_cases:\n- points: 100\n  in: 1.in\n  out: 1.out\n'
+
+        response = self.post_package(make_package(init=init), token)
+
+        self.assertEqual(response.status_code, 201)
+        problem = Problem.objects.get(code=self.body(response)['problem_id'])
+        self.assertFalse(problem.data_files.checker)
+        self.assertFalse(problem.data_files.signature_grading)
+        self.assertEqual(self.body(response)['files_written'], ['data.zip', 'init.yml'])
+
+    def test_an_unknown_builtin_checker_gets_400_with_the_reason(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        init = b'archive: data.zip\nchecker: flotante\ntest_cases:\n- points: 100\n  in: 1.in\n  out: 1.out\n'
+
+        response = self.post_package(make_package(init=init), token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['file'], 'init.yml')
+        self.assertIn("unknown built-in checker 'flotante'", error['reason'])
+        self.assertNothingWritten()
+
+    def test_a_manifest_without_visibility_gets_400_with_the_reason(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+
+        response = self.post_package(make_package(omit_manifest=('visibility',)), token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['file'], 'problem.yml')
+        self.assertIn('visibility is required', error['reason'])
+        self.assertNothingWritten()
+
+    def test_signature_grader_gets_wired_through_the_api(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        init = (b'archive: data.zip\n'
+                b'signature_grader: {entry: grader.cpp, header: grader.hpp}\n'
+                b'test_cases:\n- points: 100\n  in: 1.in\n  out: 1.out\n')
+        raw = make_package(init=init, extra={
+            'grader.cpp': b'int main() { return 0; }',
+            'grader.hpp': b'int resolver(int);\n',
+        })
+
+        response = self.post_package(raw, token)
+
+        self.assertEqual(response.status_code, 201)
+        data = Problem.objects.get(code=self.body(response)['problem_id']).data_files
+        self.assertTrue(data.signature_grading)
+        self.assertTrue(data.evaluator.name.endswith('/grader.cpp'))
+        self.assertTrue(data.signature.name.endswith('/grader.hpp'))
+        self.assertFalse(data.checker)
+
+    def test_signature_grader_without_the_header_gets_400_with_the_reason(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        init = (b'archive: data.zip\n'
+                b'signature_grader: {entry: grader.cpp}\n'
+                b'test_cases:\n- points: 100\n  in: 1.in\n  out: 1.out\n')
+
+        response = self.post_package(make_package(init=init,
+                                                  extra={'grader.cpp': b'int main() { return 0; }'}), token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['file'], 'init.yml')
+        self.assertIn('signature_grader.header is required', error['reason'])
+        self.assertNothingWritten()
+
+    def test_custom_judge_with_signature_grader_gets_400_with_the_reason(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        init = (b'archive: data.zip\n'
+                b'custom_judge: judge.py\n'
+                b'signature_grader: {entry: grader.cpp, header: grader.hpp}\n'
+                b'test_cases:\n- points: 100\n  in: 1.in\n  out: 1.out\n')
+        raw = make_package(init=init, extra={
+            'judge.py': b'def check(proc, output, point_value, **kwargs):\n    return True\n',
+            'grader.cpp': b'int main() { return 0; }',
+            'grader.hpp': b'int resolver(int);\n',
+        })
+
+        response = self.post_package(raw, token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['file'], 'init.yml')
+        self.assertIn('custom_judge cannot be combined with signature_grader', error['reason'])
         self.assertNothingWritten()
 
     def test_a_non_zip_body_is_rejected_without_writing(self):
