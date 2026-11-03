@@ -7,6 +7,7 @@ import zipfile
 from unittest import mock
 
 from django.test import TestCase, override_settings
+from reversion.models import Version
 
 from judge.models import Language, LanguageLimit, Problem, ProblemData, ProblemTestCase
 from judge.models.tests.util import create_user
@@ -928,6 +929,158 @@ class ProblemPackageTestCase(TestCase):
         self.assertEqual(caught.exception.file, 'problem.yml')
         self.assertIn('visibility must be one of', caught.exception.reason)
         self.assertEqual(Problem.objects.count(), 0)
+
+    # -- testers -----------------------------------------------------------
+
+    def test_the_manifest_accepts_testers_and_still_rejects_unknown_keys(self):
+        tester = create_user(username='examen-tester')
+
+        result = self.publish(package(manifest=yaml_manifest({'testers': ['examen-tester']})))
+
+        problem = Problem.objects.get(code=result.problem_id)
+        self.assertEqual(list(problem.testers.values_list('user__username', flat=True)), ['examen-tester'])
+        self.assertEqual(result.testers, ('examen-tester',))
+        self.assertEqual(tester.id, problem.testers.get().user_id)
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'aliases': ['suma']})))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('unknown key(s): aliases', caught.exception.reason)
+
+    def test_a_created_problem_gets_the_testers_the_package_declares(self):
+        create_user(username='ana')
+        create_user(username='beto')
+
+        result = self.publish(package(manifest=yaml_manifest({'testers': ['beto', 'ana']})))
+
+        problem = Problem.objects.get(code=result.problem_id)
+        self.assertEqual(
+            list(problem.testers.order_by('user__username').values_list('user__username', flat=True)),
+            ['ana', 'beto'],
+        )
+        # El resultado informa lo que quedó, ordenado por username.
+        self.assertEqual(result.testers, ('ana', 'beto'))
+
+    def test_an_unknown_tester_rejects_the_package_naming_every_offender(self):
+        create_user(username='ana')
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'testers': ['ana', 'fantasma', 'otro-fantasma']})))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('unknown username(s): fantasma, otro-fantasma', caught.exception.reason)
+        # Nada quedó escrito: ni fila, ni directorios, ni la relación M2M.
+        self.assertEqual(Problem.objects.count(), 0)
+        self.assertFalse(os.path.exists(self.data_root))
+        self.assertFalse(os.path.exists(self.media_root))
+
+    def test_tester_usernames_are_exact_and_case_sensitive(self):
+        create_user(username='ana')
+
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'testers': ['Ana']})))
+
+        self.assertIn('unknown username(s): Ana', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_testers_must_be_a_list_of_usernames(self):
+        with self.assertRaises(PackageError) as caught:
+            self.publish(package(manifest=yaml_manifest({'testers': 'ana'})))
+
+        self.assertEqual(caught.exception.file, 'problem.yml')
+        self.assertIn('testers must be a list of usernames', caught.exception.reason)
+        self.assertEqual(Problem.objects.count(), 0)
+
+    def test_an_absent_testers_key_leaves_the_stored_set_untouched(self):
+        create_user(username='ana')
+        problem = Problem.objects.get(code=self.publish(
+            package(manifest=yaml_manifest({'testers': ['ana']})),
+        ).problem_id)
+
+        result = self.publish(package(manifest=yaml_manifest({'title': 'Otro título'})), problem=problem)
+
+        self.assertEqual(list(problem.testers.values_list('user__username', flat=True)), ['ana'])
+        self.assertEqual(result.testers, ('ana',))
+
+    def test_a_non_empty_testers_list_replaces_the_stored_set(self):
+        create_user(username='ana')
+        create_user(username='beto')
+        problem = Problem.objects.get(code=self.publish(
+            package(manifest=yaml_manifest({'testers': ['ana']})),
+        ).problem_id)
+
+        self.publish(package(manifest=yaml_manifest({'testers': ['beto']})), problem=problem)
+
+        self.assertEqual(list(problem.testers.values_list('user__username', flat=True)), ['beto'])
+
+    def test_an_empty_testers_list_clears_the_stored_set(self):
+        create_user(username='ana')
+        problem = Problem.objects.get(code=self.publish(
+            package(manifest=yaml_manifest({'testers': ['ana']})),
+        ).problem_id)
+
+        result = self.publish(package(manifest=yaml_manifest({'testers': []})), problem=problem)
+
+        self.assertFalse(problem.testers.exists())
+        self.assertEqual(result.testers, ())
+
+    def test_republishing_the_same_testers_does_not_report_a_change(self):
+        create_user(username='ana')
+        raw = package(manifest=yaml_manifest({'testers': ['ana']}))
+        problem = Problem.objects.get(code=self.publish(raw).problem_id)
+
+        second = self.publish(raw, problem=problem)
+
+        self.assertFalse(second.changed)
+        self.assertEqual(second.testers, ('ana',))
+
+    def test_a_tester_change_reports_the_package_as_changed(self):
+        create_user(username='ana')
+        create_user(username='beto')
+        problem = Problem.objects.get(code=self.publish(
+            package(manifest=yaml_manifest({'testers': ['ana']})),
+        ).problem_id)
+
+        result = self.publish(package(manifest=yaml_manifest({'testers': ['beto']})), problem=problem)
+
+        self.assertTrue(result.changed)
+
+    def test_a_failure_after_resolution_rolls_the_testers_back(self):
+        create_user(username='ana')
+        create_user(username='beto')
+        problem = Problem.objects.get(code=self.publish(
+            package(manifest=yaml_manifest({'testers': ['ana']})),
+        ).problem_id)
+        old_media = tree(os.path.join(self.media_root, problem.code))
+
+        new_package = package(manifest=yaml_manifest({'testers': ['beto']}),
+                              statement='nuevo\n', media={'nuevo.png': b'new'})
+
+        def failing_swap(staged, live, backup):
+            raise OSError('falla simulada al intercambiar')
+
+        with mock.patch.object(problem_package, '_swap_tree', side_effect=failing_swap):
+            with self.assertRaises(PackageError) as caught:
+                self.publish(new_package, problem=problem)
+
+        self.assertIn('falla simulada', str(caught.exception))
+        # Los testers se escribieron en la misma transacción que el intercambio:
+        # el fallo los deshace junto con todo lo demás.
+        self.assertEqual(list(problem.testers.values_list('user__username', flat=True)), ['ana'])
+        self.assertEqual(tree(os.path.join(self.media_root, problem.code)), old_media)
+
+    def test_applying_testers_is_recorded_in_the_problem_history(self):
+        create_user(username='ana')
+        problem = Problem.objects.get(code=self.publish(
+            package(manifest=yaml_manifest({'testers': ['ana']})),
+        ).problem_id)
+
+        history = Version.objects.get_for_object(problem).order_by('revision')
+
+        self.assertTrue(history.exists())
+        self.assertIn('testers', history.last().revision.comment.lower())
+        self.assertIn('ana', history.last().revision.comment)
 
     # -- robustez del zip --------------------------------------------------
 

@@ -11,6 +11,7 @@ import yaml
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from reversion.models import Version
 
 from judge.models import Problem
 from judge.models.tests.util import create_organization, create_problem, create_user
@@ -471,6 +472,143 @@ class ProblemPublishAPITestCase(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('not a valid zip file', self.body(response)['error']['reason'])
         self.assertNothingWritten()
+
+    # -- testers ----------------------------------------------------------
+
+    def test_create_applies_the_testers_and_reports_the_resolved_usernames(self):
+        create_user(username='ana')
+        create_user(username='beto')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+
+        response = self.post_package(
+            make_package(manifest={'visibility': 'private', 'testers': ['beto', 'ana']}), token,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = self.body(response)
+        self.assertEqual(payload['testers'], ['ana', 'beto'])
+        problem = Problem.objects.get(code=payload['problem_id'])
+        self.assertFalse(problem.is_public)
+        self.assertEqual(
+            list(problem.testers.order_by('user__username').values_list('user__username', flat=True)),
+            ['ana', 'beto'],
+        )
+
+    def test_an_unknown_manifest_key_is_still_rejected_with_the_uniform_error(self):
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+
+        response = self.post_package(make_package(manifest={'aliases': ['suma']}), token)
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['code'], 'invalid_package')
+        self.assertEqual(error['file'], 'problem.yml')
+        self.assertIn('unknown key(s): aliases', error['reason'])
+        self.assertNothingWritten()
+
+    def test_an_unknown_tester_gets_the_package_error_and_writes_nothing(self):
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+
+        response = self.post_package(
+            make_package(manifest={'visibility': 'private', 'testers': ['ana', 'fantasma', 'otro']}), token,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        error = self.body(response)['error']
+        self.assertEqual(error['code'], 'invalid_package')
+        self.assertEqual(error['file'], 'problem.yml')
+        self.assertIn('unknown username(s): fantasma, otro', error['reason'])
+        self.assertNothingWritten()
+
+    def test_an_unknown_tester_on_replace_leaves_the_problem_and_its_testers_intact(self):
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        created = self.body(self.post_package(
+            make_package(manifest={'visibility': 'private', 'testers': ['ana']}), token,
+        ))
+
+        response = self.put_package(created['problem_id'],
+                                    make_package(manifest={'visibility': 'private', 'testers': ['fantasma']}),
+                                    token)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('unknown username(s): fantasma', self.body(response)['error']['reason'])
+        problem = Problem.objects.get(code=created['problem_id'])
+        self.assertEqual(list(problem.testers.values_list('user__username', flat=True)), ['ana'])
+        self.assertEqual(problem.name, 'Suma de dos')
+
+    def test_replace_without_the_key_keeps_the_testers(self):
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        created = self.body(self.post_package(
+            make_package(manifest={'visibility': 'private', 'testers': ['ana']}), token,
+        ))
+
+        response = self.put_package(created['problem_id'],
+                                    make_package(manifest={'visibility': 'private', 'title': 'Suma de dos v2'}),
+                                    token)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.body(response)['testers'], ['ana'])
+        self.assertEqual(
+            list(Problem.objects.get(code=created['problem_id']).testers
+                 .values_list('user__username', flat=True)),
+            ['ana'],
+        )
+
+    def test_replace_with_an_empty_list_clears_the_testers(self):
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        created = self.body(self.post_package(
+            make_package(manifest={'visibility': 'private', 'testers': ['ana']}), token,
+        ))
+
+        response = self.put_package(created['problem_id'],
+                                    make_package(manifest={'visibility': 'private', 'testers': []}),
+                                    token)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.body(response)['testers'], [])
+        self.assertFalse(Problem.objects.get(code=created['problem_id']).testers.exists())
+
+    def test_republishing_the_same_testers_is_not_reported_as_changed(self):
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        raw = make_package(manifest={'visibility': 'private', 'testers': ['ana']})
+        created = self.body(self.post_package(raw, token))
+
+        response = self.put_package(created['problem_id'], raw, token)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.body(response)['changed'])
+        self.assertEqual(self.body(response)['testers'], ['ana'])
+
+    def test_naming_a_tester_needs_no_permission_beyond_the_endpoint(self):
+        # D4: alcanza con lo que ya exige el endpoint, sin ser staff.
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem',))
+
+        response = self.post_package(
+            make_package(manifest={'visibility': 'private', 'testers': ['ana']}), token,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(user.is_staff)
+        self.assertEqual(self.body(response)['testers'], ['ana'])
+
+    def test_a_replace_with_a_tester_change_is_recorded_in_the_problem_history(self):
+        create_user(username='ana')
+        user, token = self.user_with_token('problemsetter', ('edit_own_problem', 'change_public_visibility'))
+        created = self.body(self.post_package(make_package(manifest={'visibility': 'private'}), token))
+
+        self.put_package(created['problem_id'],
+                         make_package(manifest={'visibility': 'private', 'testers': ['ana']}), token)
+
+        problem = Problem.objects.get(code=created['problem_id'])
+        revision = Version.objects.get_for_object(problem).order_by('revision').last().revision
+        self.assertEqual(revision.user, user)
+        self.assertIn('ana', revision.comment)
 
     # -- límites del request ---------------------------------------------
 

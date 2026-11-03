@@ -14,6 +14,10 @@ manifiesto con ``visibility: public`` exige además
 ``judge.change_public_visibility``, igual que el admin; el chequeo lo hace el
 servicio, así que el formulario de staff aplica la misma regla.
 
+Nombrar testers en el manifiesto no agrega ningún permiso: lo puede hacer
+quien ya puede publicar ese problema (alta o reemplazo), y el servicio anota el
+cambio en el historial del problema con el usuario que publicó.
+
 La validación y la escritura de problemas son del servicio
 ``judge.utils.problem_package``; esta vista solo traduce su resultado y sus
 errores a HTTP y aplica los límites del request antes de llamarlo. Cuando la
@@ -119,6 +123,7 @@ def publish_response(result, status):
         'media_files': list(result.media_files),
         'cases': result.cases,
         'warnings': list(result.warnings),
+        'testers': list(result.testers),
     }
     response = JsonResponse(payload, status=status)
     if status == 201:

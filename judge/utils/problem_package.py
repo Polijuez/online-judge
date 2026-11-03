@@ -41,9 +41,17 @@ valor del problema cuando están)::
     time_limit: 2.0      # opcional; límite por defecto del problema
     memory_limit: 262144 # opcional; KiB
     points: 100          # opcional
+    testers: [ana, beto] # opcional; usernames exactos
 
 Un ``schema`` distinto de ``1`` se rechaza sin intentar interpretarlo. Las
 claves desconocidas también: el manifiesto es un contrato del servidor.
+
+``testers`` son los usuarios que pueden ver el problema y enviar aunque no sea
+público. Se nombran por username exacto —sensible a mayúsculas— y todos tienen
+que existir: un nombre desconocido rechaza el paquete entero antes de escribir
+nada, nombrando cada uno. La clave es opcional y su ausencia deja el conjunto
+vigente como está, así que republicar desde otra cuenta no le saca el acceso a
+nadie; una lista con nombres lo reemplaza y una lista vacía lo borra.
 
 Los límites se aplican a **todas** las ``Language`` con esa extensión (ADR
 0006). Publicar reemplaza el paquete vigente (ADR 0005): el árbol de datos y el
@@ -63,11 +71,14 @@ from urllib.parse import quote, urljoin
 
 import yaml
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils.translation import gettext as _
+from reversion import revisions
 
-from judge.models import Language, LanguageLimit, Problem, ProblemData, ProblemGroup, ProblemTestCase, ProblemType
+from judge.models import Language, LanguageLimit, Problem, ProblemData, ProblemGroup, ProblemTestCase, ProblemType, \
+    Profile
 from judge.models.problem import PROBLEM_ID_REGEX
 
 __all__ = [
@@ -101,7 +112,7 @@ SIGNATURE_GRADER_KEYS = frozenset({'entry', 'header', 'allow_main'})
 
 MANIFEST_KEYS = frozenset({
     'schema', 'title', 'limits', 'types', 'group', 'visibility',
-    'time_limit', 'memory_limit', 'points',
+    'time_limit', 'memory_limit', 'points', 'testers',
 })
 LIMIT_KEYS = frozenset({'tl', 'ml'})
 VISIBILITIES = {'public': True, 'private': False}
@@ -148,6 +159,8 @@ class PublishResult:
     warnings: tuple
     created: bool
     changed: bool
+    #: Usernames de los que pueden probar el problema, tal como quedaron.
+    testers: tuple = ()
 
 
 @dataclass
@@ -160,6 +173,9 @@ class _Manifest:
     time_limit: float = None
     memory_limit: int = None
     points: float = None
+    #: ``None`` cuando el manifiesto no declara ``testers``: el conjunto
+    #: vigente queda como está. Una tupla —incluso vacía— lo reemplaza.
+    testers: tuple = None
 
 
 @dataclass
@@ -361,10 +377,12 @@ def _parse_manifest(raw):
             raise _package_error('points must be a non-negative number', file=MANIFEST_NAME)
         points = float(points)
 
+    testers = _parse_testers(data['testers']) if 'testers' in data else None
+
     return _Manifest(
         title=title, limits=limits, types=types, group=group,
         is_public=VISIBILITIES[visibility], time_limit=time_limit,
-        memory_limit=memory_limit, points=points,
+        memory_limit=memory_limit, points=points, testers=testers,
     )
 
 
@@ -392,6 +410,76 @@ def _parse_memory_limit(value, label):
     if value > maximum:
         raise _package_error('%s is over the %sKB limit' % (label, maximum), file=MANIFEST_NAME)
     return value
+
+
+def _parse_testers(value):
+    """Valida la forma de ``testers``; resolver los usuarios es del servicio.
+
+    Los nombres se guardan tal cual: la identidad es el username exacto, así
+    que no se recortan ni se normalizan. Un nombre con espacios alrededor no
+    coincide con nadie y se rechaza como desconocido al resolverlo.
+    """
+    if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+        raise _package_error('testers must be a list of usernames', file=MANIFEST_NAME)
+    maximum = User._meta.get_field('username').max_length
+    names = []
+    seen = set()
+    for name in value:
+        if not name:
+            raise _package_error('testers must not contain empty usernames', file=MANIFEST_NAME)
+        if len(name) > maximum:
+            raise _package_error('tester username is too long: %s' % name, file=MANIFEST_NAME)
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return tuple(names)
+
+
+def _resolve_testers(names):
+    """Traduce usernames a ``Profile``, en el orden del manifiesto.
+
+    La comparación es exacta y sensible a mayúsculas aunque la colación de la
+    base no lo sea: se filtra en Python sobre lo que devolvió la consulta. Si
+    algún nombre no existe se rechaza el paquete entero nombrando a todos los
+    que faltan; no se crea ningún usuario.
+    """
+    if not names:
+        return []
+    profiles = {}
+    for profile in Profile.objects.select_related('user').filter(user__username__in=names):
+        if profile.user.username in names:
+            profiles[profile.user.username] = profile
+    unknown = [name for name in names if name not in profiles]
+    if unknown:
+        raise _package_error('unknown username(s): %s' % ', '.join(unknown), file=MANIFEST_NAME)
+    return [profiles[name] for name in names]
+
+
+def _apply_testers(problem, testers, user):
+    """Aplica el conjunto de testers ya resuelto, dejando constancia del cambio.
+
+    ``testers`` en ``None`` significa que el manifiesto no traía la clave: el
+    conjunto vigente no se toca. Con una tupla —vacía incluida— se reemplaza.
+    Solo se escribe, y se registra en el historial del problema, cuando el
+    conjunto resultante es distinto del vigente: republicar lo mismo no
+    ensucia el historial.
+    """
+    if testers is None:
+        return
+    wanted = {profile.id for profile in testers}
+    if set(problem.testers.values_list('id', flat=True)) == wanted:
+        return
+    # ``testers.set`` dispara ``m2m_changed``, que suma el problema a la
+    # revisión; acá solo se le pone autor y motivo.
+    with revisions.create_revision(atomic=True):
+        problem.testers.set(testers)
+        if user is not None:
+            revisions.set_user(user)
+        names = ', '.join(profile.user.username for profile in testers)
+        revisions.set_comment(
+            _('Testers set by the published package: %s') % names if names
+            else _('Testers cleared by the published package'),
+        )
 
 
 def _parse_names(value, key):
@@ -1094,7 +1182,14 @@ def _resolve_types(names, warnings):
     return types
 
 
-def _apply_metadata(problem, package, specs, created, warnings, author=None):
+def _apply_metadata(problem, package, specs, created, warnings, author=None, testers=None, user=None):
+    """Aplica el manifiesto al problema; ``testers`` ya viene resuelto.
+
+    Corre dentro de la transacción de ``publish_package`` junto con el
+    intercambio de árboles, así que un fallo posterior también deshace los
+    testers. ``user`` es quien publica y queda como autor del cambio en el
+    historial del problema (D4).
+    """
     manifest = package.manifest
     group = _resolve_group(manifest.group, warnings)
     types = _resolve_types(manifest.types, warnings)
@@ -1137,6 +1232,7 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
             transaction.on_commit(rescore_problem.s(problem.pk).delay)
 
     problem.types.set(types)
+    _apply_testers(problem, testers, user)
 
     if not _limits_match(problem, manifest):
         LanguageLimit.objects.filter(problem=problem).delete()
@@ -1179,6 +1275,18 @@ def _apply_metadata(problem, package, specs, created, warnings, author=None):
     ProblemData.objects.filter(pk=data.pk).update(**fields)
 
 
+def _testers_match(problem, testers):
+    """¿El conjunto de testers ya es el que pide el manifiesto?
+
+    ``testers`` en ``None`` significa clave ausente: no hay nada que comparar
+    porque no se va a escribir. Comparar acá es lo que evita que republicar el
+    mismo paquete diga ``changed`` solo porque se volvió a escribir el M2M.
+    """
+    if testers is None or problem.pk is None:
+        return True
+    return set(problem.testers.values_list('id', flat=True)) == {profile.id for profile in testers}
+
+
 def _check_public_visibility(manifest, user):
     """Exige el permiso de visibilidad del admin para publicar como público.
 
@@ -1207,6 +1315,11 @@ def publish_package(source, problem=None, author=None, user=None):
     medios en directorios temporales de la misma raíz, intercambiándolos recién
     al final. Ante cualquier fallo, el paquete anterior queda intacto.
 
+    ``testers`` del manifiesto se resuelven acá —contra la base, porque es lo
+    que el parser no puede validar— antes de preparar ningún directorio, y se
+    aplican dentro de la misma transacción que la metadata, de modo que un
+    nombre desconocido o un fallo posterior no dejan ni testers ni archivos.
+
     Devuelve un :class:`PublishResult`. Los errores de validación son
     :class:`PackageError` y nombran el archivo y el motivo.
     """
@@ -1219,6 +1332,10 @@ def publish_package(source, problem=None, author=None, user=None):
         package.archive_name, package.archive_bytes,
     ))
     _validate_case_points(specs)
+
+    # Los usuarios se resuelven antes de tocar disco: un username desconocido
+    # rechaza el paquete sin haber creado directorios ni filas.
+    testers = None if manifest.testers is None else _resolve_testers(manifest.testers)
 
     created = problem is None
     if created:
@@ -1256,11 +1373,13 @@ def publish_package(source, problem=None, author=None, user=None):
         needs_media_swap = not _tree_matches(media_live, media_stage)
 
         changed = created or needs_data_swap or needs_media_swap or not _manifest_matches(problem, package) \
-            or not _limits_match(problem, manifest) or not _cases_match(problem, specs)
+            or not _limits_match(problem, manifest) or not _cases_match(problem, specs) \
+            or not _testers_match(problem, testers)
 
         try:
             with transaction.atomic():
-                _apply_metadata(problem, package, specs, created, warnings, author=author)
+                _apply_metadata(problem, package, specs, created, warnings, author=author,
+                                testers=testers, user=user)
 
                 if needs_data_swap:
                     _swap_tree(data_stage, data_live, data_backup)
@@ -1296,4 +1415,8 @@ def publish_package(source, problem=None, author=None, user=None):
         warnings=tuple(warnings),
         created=created,
         changed=changed,
+        # Lo que quedó, no lo que pidió el paquete: con la clave ausente la
+        # lista vigente sigue siendo la respuesta útil.
+        testers=tuple(problem.testers.order_by('user__username')
+                      .values_list('user__username', flat=True)),
     )
